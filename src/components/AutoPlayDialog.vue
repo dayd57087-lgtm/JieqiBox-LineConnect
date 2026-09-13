@@ -125,6 +125,51 @@
           <v-card
             variant="outlined"
             class="lc-check"
+            :class="{ 'lc-check--ok': overlayOk }"
+          >
+            <div class="lc-check__head">
+              <v-icon size="18">
+                {{ overlayOk ? 'mdi-check-circle' : 'mdi-alert-circle-outline' }}
+              </v-icon>
+              <span>{{ t('lineConnect.overlay') }}</span>
+            </div>
+            <p class="lc-check__hint">
+              {{
+                overlayOk
+                  ? t('lineConnect.overlayReadyHint')
+                  : captureRunning
+                    ? t('lineConnect.overlayNoPermissionHint')
+                    : t('lineConnect.overlayNoServiceHint')
+              }}
+            </p>
+            <div class="lc-check__actions">
+              <v-btn
+                size="small"
+                color="primary"
+                variant="tonal"
+                :disabled="!isSupported || overlayOk"
+                @click="grantOverlay"
+              >
+                {{ t('lineConnect.overlayGrant') }}
+              </v-btn>
+              <v-btn
+                size="small"
+                variant="text"
+                :disabled="!isSupported"
+                @click="toggleOverlay"
+              >
+                {{
+                  overlayVisible
+                    ? t('lineConnect.overlayHide')
+                    : t('lineConnect.overlayShow')
+                }}
+              </v-btn>
+            </div>
+          </v-card>
+
+          <v-card
+            variant="outlined"
+            class="lc-check"
             :class="{ 'lc-check--ok': engineOk }"
           >
             <div class="lc-check__head">
@@ -142,6 +187,16 @@
             </p>
           </v-card>
         </div>
+
+        <v-alert
+          v-if="overlayOk"
+          type="info"
+          density="compact"
+          variant="tonal"
+          class="mt-3"
+        >
+          {{ t('lineConnect.overlayTip') }}
+        </v-alert>
 
         <!-- Configuration -->
         <v-expansion-panels variant="accordion" class="mt-3">
@@ -258,6 +313,7 @@
                   {{ t('lineConnect.board') }}:
                   {{ boardDetected ? t('lineConnect.found') : t('lineConnect.missing') }}
                 </span>
+                <span>{{ t('lineConnect.overlayTicks') }}: {{ tickCount }}</span>
               </div>
 
               <div v-if="lastWarnings.length" class="lc-warnings">
@@ -376,6 +432,12 @@
     isCapturing,
     hasCapturePermission,
     hasAccessibility,
+    overlayVisible,
+    tickCount,
+    showOverlay,
+    hideOverlay,
+    refreshOverlayVisible,
+    canDrawOverlays,
     requestCapturePermission,
     openAccessibilitySettings,
     startCapture,
@@ -390,6 +452,7 @@
   const captureOk = ref(false)
   const captureRunning = ref(false)
   const a11yOk = ref(false)
+  const overlayOk = ref(false)
   const engineOk = computed(() => !!engine?.isEngineLoaded?.value)
 
   const logContainer = ref<HTMLElement | null>(null)
@@ -410,6 +473,21 @@
     captureOk.value = hasCapturePermission() || isCapturing()
     captureRunning.value = isCapturing()
     a11yOk.value = hasAccessibility()
+    overlayOk.value = isSupported() && canDrawOverlays()
+    refreshOverlayVisible()
+  }
+
+  function grantOverlay() {
+    lc.openOverlaySettings()
+  }
+
+  function toggleOverlay() {
+    if (overlayVisible.value) {
+      hideOverlay()
+    } else {
+      showOverlay()
+    }
+    refreshStatus()
   }
 
   function formatTime(ts: number): string {
@@ -424,6 +502,11 @@
       refreshStatus()
     }
   })
+
+  // The overlay permission is granted in system settings, so re-check on focus.
+  function onWindowFocus() {
+    refreshStatus()
+  }
 
   watch(
     () => logs.value.length,
@@ -444,12 +527,17 @@
     refreshStatus()
     pollTimer = setInterval(refreshStatus, 1500)
     window.addEventListener('line-connect-projection', onProjectionEvent)
+    window.addEventListener('focus', onWindowFocus)
+    document.addEventListener('visibilitychange', onWindowFocus)
   })
 
   onUnmounted(() => {
     if (pollTimer) clearInterval(pollTimer)
     window.removeEventListener('line-connect-projection', onProjectionEvent)
-    if (isRunning.value) stop()
+    window.removeEventListener('focus', onWindowFocus)
+    document.removeEventListener('visibilitychange', onWindowFocus)
+    // The line-connect session deliberately keeps running when the dialog is
+    // closed: the floating bar is the control surface from then on.
   })
 </script>
 

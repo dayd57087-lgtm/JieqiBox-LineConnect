@@ -7,4 +7,11 @@
     <string name="line_connect_notification_text">正在读取屏幕画面，用于识别棋盘</string>
     <string name="accessibility_service_label">JieqiBox 自动走棋</string>
     <string name="accessibility_service_description">开启后，JieqiBox 可以在其他象棋应用中代替你完成落子操作（连线自动走棋）。该服务仅用于发送点击与滑动手势，不会读取或上传你的屏幕内容。</string>
+    <string name="line_connect_overlay_new_game">新局</string>
+    <string name="line_connect_overlay_auto_start">自动</string>
+    <string name="line_connect_overlay_auto_stop">停止</string>
+    <string name="line_connect_overlay_variation">变招</string>
+    <string name="line_connect_overlay_board">棋盘</string>
+    <string name="line_connect_overlay_idle">待机</string>
+    <string name="line_connect_overlay_scan">扫描</string>
 </resources>

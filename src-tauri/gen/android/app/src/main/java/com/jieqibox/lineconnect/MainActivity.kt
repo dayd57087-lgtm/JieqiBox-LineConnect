@@ -17,8 +17,30 @@ import java.io.FileOutputStream
 import java.io.InputStream
 
 class MainActivity : TauriActivity() {
-    
-    private val TAG = "MainActivity"
+
+    companion object {
+        private const val TAG = "MainActivity"
+
+        /**
+         * Weak handle on the live webview so background components (the capture
+         * service, the floating bar) can push events into the running app.
+         */
+        @Volatile
+        private var webViewRef: java.lang.ref.WeakReference<WebView>? = null
+
+        /** Evaluates [script] in the app webview, if one is alive. */
+        fun dispatchJs(script: String) {
+            val view = webViewRef?.get() ?: return
+            view.post {
+                try {
+                    view.evaluateJavascript(script, null)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to evaluate JS", e)
+                }
+            }
+        }
+    }
+
     private var webView: WebView? = null
     
     // Store the current SAF request data
@@ -78,6 +100,7 @@ class MainActivity : TauriActivity() {
     override fun onWebViewCreate(webView: WebView) {
         super.onWebViewCreate(webView)
         this.webView = webView
+        webViewRef = java.lang.ref.WeakReference(webView)
         webView.addJavascriptInterface(SafFileInterface(), "SafFileInterface")
         
         // Listen for external URL opening events from Tauri
@@ -353,6 +376,35 @@ class MainActivity : TauriActivity() {
         }
     }
 
+    /**
+     * Brings this task back to the foreground.
+     *
+     * Named `moveToFront` because `bringToFront()` already exists on Activity.
+     * Used by the floating bar's "棋盘" action.
+     */
+    fun moveToFront() {
+        try {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                )
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to bring the app to front", e)
+        }
+    }
+
+    /** True when the app is allowed to draw over other apps. */
+    fun canDrawOverlaysNow(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            android.provider.Settings.canDrawOverlays(this)
+        } else {
+            true
+        }
+    }
+
     /** Best-effort foreground package lookup, preferring the accessibility service. */
     fun currentForegroundPackage(): String {
         val service = AutoPlayAccessibilityService.instance
@@ -365,8 +417,24 @@ class MainActivity : TauriActivity() {
         return ""
     }
 
+    /**
+     * A webview that is considered hidden throttles its own timers, which would
+     * stall the line-connect loop as soon as the user switches to the game app.
+     * Tauri may pause the timers in `super.onPause()`, so they are resumed again
+     * afterwards; the loop itself is driven natively by ScreenCaptureService.
+     */
+    override fun onPause() {
+        super.onPause()
+        try {
+            webView?.resumeTimers()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to resume webview timers", e)
+        }
+    }
+
     override fun onDestroy() {
         stopProjectionService()
+        webViewRef = null
         super.onDestroy()
     }
 }

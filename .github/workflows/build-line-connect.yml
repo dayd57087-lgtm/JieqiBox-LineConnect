@@ -141,6 +141,6 @@ jobs:
           cp "${{ steps.sign.outputs.apk }}" jieqibox-line-connect.apk
           gh release create "$TAG" jieqibox-line-connect.apk \
             --title "JieqiBox 连线自动走棋" \
-            --notes "自动构建产物（arm64-v8a，包名 com.jieqibox.lineconnect）。与官方 JieqiBox 包名不同，可同时安装、互不影响。" \
+            --notes "自动构建产物（arm64-v8a，包名 com.jieqibox.lineconnect）。新增：切到对弈 App 后可拖动悬浮控制条（新局/扫描/自动/变招/棋盘），识别循环改由原生服务驱动以避开 WebView 后台节流。" \
             --prerelease
           echo "Download: https://github.com/${{ github.repository }}/releases/download/$TAG/jieqibox-line-connect.apk"

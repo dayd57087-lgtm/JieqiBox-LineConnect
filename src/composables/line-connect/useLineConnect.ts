@@ -61,6 +61,10 @@ export function useLineConnect(deps: LineConnectDeps) {
   const boardDetected = ref(false)
   const lastWarnings = ref<string[]>([])
 
+  const overlayVisible = ref(false)
+  const overlaySupported = ref(false)
+  const tickCount = ref(0)
+
   const poolTracker = new JieqiPoolTracker()
 
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -70,6 +74,22 @@ export function useLineConnect(deps: LineConnectDeps) {
   let turn: 'w' | 'b' = 'w'
   let startedOnce = false
   let busy = false
+
+  /**
+   * When true the polling loop is driven by the native capture service rather
+   * than by `setTimeout`. A webview that is not visible throttles its own
+   * timers, so the native tick is what keeps the loop alive once the user
+   * switches to the game app.
+   */
+  let nativeTickActive = false
+
+  /** Move the next analysis should avoid (the "变招" / change-move action). */
+  let avoidMove: string | null = null
+
+  /** Timestamp of the last move we played, used for the waiting counter. */
+  let lastMoveTime = 0
+
+  let overlayListenerBound = false
 
   /* ------------------------------------------------------------------ */
   /* Logging                                                             */
@@ -97,6 +117,11 @@ export function useLineConnect(deps: LineConnectDeps) {
 
   function isSupported(): boolean {
     return bridge() !== null
+  }
+
+  function supportsOverlay(): boolean {
+    const api = bridge() as any
+    return !!api && typeof api.showOverlay === 'function'
   }
 
   function hasCapturePermission(): boolean {
@@ -283,8 +308,34 @@ export function useLineConnect(deps: LineConnectDeps) {
       log('warn', `载入局面失败：${String(e)}`)
     }
 
+    // "变招": restrict the search to every legal move except the previous one.
+    let searchmoves: string[] = []
+    if (avoidMove) {
+      const banned = avoidMove.slice(0, 4)
+      try {
+        const all = (deps.game.getAllLegalMovesForCurrentPosition?.() ??
+          []) as string[]
+        searchmoves = all
+          .map(m => String(m).slice(0, 4))
+          .filter(m => m && m !== banned)
+        if (!searchmoves.length) {
+          log('warn', '没有可用的替代着法，按常规分析')
+        } else {
+          log('info', `变招：已排除 ${banned}，候选 ${searchmoves.length} 个着法`)
+        }
+      } catch (e) {
+        log('warn', `计算候选着法失败：${String(e)}`)
+      }
+      avoidMove = null
+    }
+
     engine.bestMove.value = ''
-    engine.startAnalysis({ movetime: settings.value.thinkTimeMs }, [], fen)
+    engine.startAnalysis(
+      { movetime: settings.value.thinkTimeMs },
+      [],
+      fen,
+      searchmoves
+    )
 
     const best = await waitForBestMove(settings.value.thinkTimeMs + 4000)
     return best
@@ -354,14 +405,248 @@ export function useLineConnect(deps: LineConnectDeps) {
   }
 
   /* ------------------------------------------------------------------ */
+  /* Floating control bar                                                */
+  /* ------------------------------------------------------------------ */
+
+  function openOverlaySettings() {
+    try {
+      bridge()?.openOverlaySettings?.()
+      log('info', '已打开「显示在其他应用上层」设置，请为本应用开启')
+    } catch (e) {
+      log('error', `打开悬浮窗设置失败：${String(e)}`)
+    }
+  }
+
+  function canDrawOverlays(): boolean {
+    try {
+      return !!bridge()?.canDrawOverlays?.()
+    } catch {
+      return false
+    }
+  }
+
+  function showOverlay(): boolean {
+    const api = bridge()
+    if (!api?.showOverlay) return false
+    if (!canDrawOverlays()) {
+      log('warn', '需要「显示在其他应用上层」权限才能使用悬浮窗')
+      return false
+    }
+    const ok = !!api.showOverlay()
+    overlayVisible.value = ok
+    if (ok) {
+      log('info', '悬浮窗已显示，可拖动状态条移动位置')
+      syncOverlay()
+    } else {
+      log('warn', '悬浮窗显示失败，请先启动截屏服务')
+    }
+    return ok
+  }
+
+  function hideOverlay() {
+    try {
+      bridge()?.hideOverlay?.()
+    } catch {
+      // ignore
+    }
+    overlayVisible.value = false
+  }
+
+  function refreshOverlayVisible() {
+    try {
+      overlayVisible.value = !!bridge()?.isOverlayVisible?.()
+    } catch {
+      // ignore
+    }
+  }
+
+  function evaluationText(): string {
+    const raw = String(deps.engine?.analysis?.value ?? '').trim()
+    if (!raw) return '评估 --'
+    // Engine lines look like: "info depth 20 score cp 35 pv ..." — surface the score.
+    const cp = raw.match(/score\s+cp\s+(-?\d+)/)
+    if (cp) {
+      const pawns = Number(cp[1]) / 100
+      return `评估 ${pawns >= 0 ? '+' : ''}${pawns.toFixed(2)}`
+    }
+    const mate = raw.match(/score\s+mate\s+(-?\d+)/)
+    if (mate) return `评估 杀 ${mate[1]}`
+    return '评估 --'
+  }
+
+  function turnText(): string {
+    return `轮到${turn === 'w' ? '红方' : '黑方'}`
+  }
+
+  function statusText(): string {
+    switch (phase.value) {
+      case 'capturing':
+      case 'recognising':
+        return '识别中'
+      case 'thinking':
+        return '思考中'
+      case 'moving':
+        return '落子中'
+      case 'waiting':
+        return isRunning.value ? '等待对手' : '待机'
+      default:
+        return '待机'
+    }
+  }
+
+  function waitingText(): string {
+    if (!lastMoveTime) return '等待 0秒'
+    const seconds = Math.max(0, Math.round((Date.now() - lastMoveTime) / 1000))
+    return `等待 ${seconds}秒`
+  }
+
+  /** Pushes the current state into the floating bar. */
+  function syncOverlay() {
+    const api = bridge()
+    if (!api?.updateOverlay) return
+    if (!api.isOverlayVisible?.()) return
+    try {
+      api.updateOverlay(
+        JSON.stringify({
+          turn: turnText(),
+          status: statusText(),
+          evaluation: evaluationText(),
+          waiting: waitingText(),
+          autoRunning: isRunning.value,
+          autoEnabled: hasAccessibility() && !!deps.engine?.isEngineLoaded?.value,
+          scanEnabled: hasCapturePermission(),
+        })
+      )
+    } catch {
+      // ignore: the bar is best-effort
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Overlay actions                                                     */
+  /* ------------------------------------------------------------------ */
+
+  function handleOverlayAction(action: string) {
+    switch (action) {
+      case 'scan':
+        log('info', '悬浮窗：执行一次识别')
+        void stepOnce()
+        break
+      case 'auto':
+        if (isRunning.value) stop()
+        else start()
+        break
+      case 'variation':
+        if (!lastMove.value) {
+          log('warn', '悬浮窗：还没有可变更的着法')
+          break
+        }
+        avoidMove = lastMove.value
+        log('info', `悬浮窗：变招（排除 ${lastMove.value.slice(0, 4)}）`)
+        break
+      case 'newGame':
+        log('info', '悬浮窗：重置为新对局')
+        resetSession()
+        break
+      case 'board':
+        log('info', '悬浮窗：切回 JieqiBox 查看棋盘')
+        try {
+          bridge()?.bringToFront?.()
+        } catch {
+          // ignore
+        }
+        break
+      case 'close':
+        log('info', '悬浮窗：已关闭')
+        stop()
+        hideOverlay()
+        break
+      default:
+        break
+    }
+  }
+
+  function bindOverlayListener() {
+    if (overlayListenerBound) return
+    overlayListenerBound = true
+    window.addEventListener('line-connect-overlay', (event: Event) => {
+      const action = (event as CustomEvent)?.detail?.action
+      if (typeof action === 'string') handleOverlayAction(action)
+    })
+  }
+
+  /** Clears per-game state so a new game can be tracked from scratch. */
+  function resetSession() {
+    poolTracker.reset()
+    expectedOpponentKey = null
+    stableKey = ''
+    stableCount = 0
+    startedOnce = false
+    avoidMove = null
+    lastMoveTime = 0
+    moveCount.value = 0
+    passes.value = 0
+    errorCount.value = 0
+    detectionCount.value = 0
+    lastMove.value = ''
+    lastFen.value = ''
+    lastWarnings.value = []
+    turn = settings.value.mySide
+    syncOverlay()
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Main loop                                                           */
   /* ------------------------------------------------------------------ */
+
+  /** Entry point used by the native tick driver. */
+  function onNativeTick() {
+    tickCount.value++
+    if (!isRunning.value) return
+    syncOverlay()
+    if (busy) return
+    void runOnce()
+  }
 
   function schedule(delayMs: number) {
     if (timer) clearTimeout(timer)
     timer = setTimeout(() => {
+      if (nativeTickActive) return
       void runOnce()
     }, delayMs)
+  }
+
+  function startLoopDriver() {
+    const api = bridge()
+    nativeTickActive = false
+    if (api?.startTick) {
+      try {
+        nativeTickActive = !!api.startTick(settings.value.pollIntervalMs)
+      } catch {
+        nativeTickActive = false
+      }
+    }
+    if (nativeTickActive) {
+      log('info', `识别循环由原生服务驱动（每 ${settings.value.pollIntervalMs}ms）`)
+    } else {
+      log('info', '使用前端定时器驱动识别循环')
+      schedule(200)
+    }
+  }
+
+  function stopLoopDriver() {
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
+    }
+    if (nativeTickActive) {
+      try {
+        bridge()?.stopTick?.()
+      } catch {
+        // ignore
+      }
+      nativeTickActive = false
+    }
   }
 
   async function runOnce() {
@@ -376,9 +661,12 @@ export function useLineConnect(deps: LineConnectDeps) {
     } finally {
       busy = false
       if (isRunning.value) {
-        const elapsed = Date.now() - started
-        schedule(Math.max(120, settings.value.pollIntervalMs - elapsed))
+        if (!nativeTickActive) {
+          const elapsed = Date.now() - started
+          schedule(Math.max(120, settings.value.pollIntervalMs - elapsed))
+        }
       }
+      syncOverlay()
     }
   }
 
@@ -513,6 +801,7 @@ export function useLineConnect(deps: LineConnectDeps) {
     lastMove.value = best
     if (played) {
       moveCount.value++
+      lastMoveTime = Date.now()
       // From now on we expect the opponent to answer.
       expectedOpponentKey = key
       turn = turn === 'w' ? 'b' : 'w'
@@ -560,15 +849,7 @@ export function useLineConnect(deps: LineConnectDeps) {
       log('error', '请先加载 UCI 引擎再开始连线')
       return
     }
-    poolTracker.reset()
-    expectedOpponentKey = null
-    stableKey = ''
-    stableCount = 0
-    startedOnce = false
-    moveCount.value = 0
-    passes.value = 0
-    errorCount.value = 0
-    turn = settings.value.mySide
+    resetSession()
     isRunning.value = true
     // Warm the model up in the background so the first pass is not slowed down
     // by a multi-second ONNX session creation.
@@ -579,14 +860,12 @@ export function useLineConnect(deps: LineConnectDeps) {
         settings.value.dryRun ? '演练模式' : '自动落子'
       }）`
     )
-    schedule(200)
+    startLoopDriver()
+    syncOverlay()
   }
 
   function stop(reason?: string) {
-    if (timer) {
-      clearTimeout(timer)
-      timer = null
-    }
+    stopLoopDriver()
     if (isRunning.value) {
       log('info', reason ? `已停止：${reason}` : '已停止连线自动走棋')
     }
@@ -597,6 +876,7 @@ export function useLineConnect(deps: LineConnectDeps) {
     } catch {
       // ignore
     }
+    syncOverlay()
   }
 
   /** Runs a single recognition pass without starting the loop. */
@@ -610,6 +890,13 @@ export function useLineConnect(deps: LineConnectDeps) {
     } finally {
       busy = false
     }
+  }
+
+  // The floating bar is created by the native layer, so its taps arrive as
+  // window events; the native tick driver calls back into onNativeTick.
+  if (typeof window !== 'undefined') {
+    bindOverlayListener()
+    ;(window as any).__lineConnectTick__ = onNativeTick
   }
 
   return {
@@ -627,6 +914,18 @@ export function useLineConnect(deps: LineConnectDeps) {
     boardDetected,
     lastWarnings,
     isSupported,
+    overlayVisible,
+    overlaySupported,
+    tickCount,
+    supportsOverlay,
+    showOverlay,
+    hideOverlay,
+    refreshOverlayVisible,
+    canDrawOverlays,
+    openOverlaySettings,
+    syncOverlay,
+    resetSession,
+    onNativeTick,
     hasCapturePermission,
     isCapturing,
     hasAccessibility,

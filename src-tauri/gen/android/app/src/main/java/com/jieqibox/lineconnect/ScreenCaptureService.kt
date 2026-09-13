@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.util.Base64
 import android.util.DisplayMetrics
 import android.util.Log
@@ -94,6 +95,27 @@ class ScreenCaptureService : Service() {
     @Volatile private var minFrameIntervalMs = 120L
     private var lastAcceptedTime = 0L
 
+    /**
+     * Floating control bar shown on top of other apps.
+     *
+     * It lives here rather than in the activity because the bar has to survive
+     * the user switching to the game app.
+     */
+    private var overlay: LineConnectOverlay? = null
+
+    /**
+     * Drives the JS recognition loop from the native side.
+     *
+     * A webview that is not visible gets its `setTimeout` callbacks throttled
+     * (or suspended outright), so a JS-only polling loop stops as soon as the
+     * user switches away. `evaluateJavascript` keeps working in the background,
+     * so the native timer is what actually keeps the loop alive.
+     */
+    private var tickHandler: Handler? = null
+    private var tickRunnable: Runnable? = null
+
+    @Volatile private var tickCount = 0L
+
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
             Log.i(TAG, "MediaProjection stopped by the system")
@@ -139,6 +161,10 @@ class ScreenCaptureService : Service() {
             release(true)
             return START_NOT_STICKY
         }
+
+        // Surface the floating control bar when the user allows overlays. A
+        // missing permission is not fatal: the in-app panel still works.
+        ensureOverlay()
 
         Log.i(TAG, "Screen capture started at ${frameWidth}x${frameHeight} (screen ${screenWidth}x$screenHeight)")
         return START_NOT_STICKY
@@ -289,6 +315,118 @@ class ScreenCaptureService : Service() {
     /** Returns how many frames have been produced since the service started. */
     fun framesCaptured(): Long = frameCounter
 
+    /* ------------------------------------------------------------------ */
+    /* Floating control bar                                                */
+    /* ------------------------------------------------------------------ */
+
+    /** True when the app is allowed to draw over other apps. */
+    fun canDrawOverlays(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            android.provider.Settings.canDrawOverlays(this)
+        } else {
+            true
+        }
+    }
+
+    /**
+     * Creates and shows the floating bar when the overlay permission is held.
+     *
+     * @return true when the bar is visible afterwards.
+     */
+    fun ensureOverlay(): Boolean {
+        if (!canDrawOverlays()) {
+            Log.i(TAG, "Overlay permission not granted; skipping floating bar")
+            return false
+        }
+        val existing = overlay
+        if (existing != null && existing.isVisible) return true
+
+        val created = existing ?: LineConnectOverlay(this) { action ->
+            MainActivity.dispatchJs(
+                "window.dispatchEvent(new CustomEvent('line-connect-overlay', " +
+                    "{ detail: { action: '${action.replace("'", "\\'")}' } }));"
+            )
+        }
+        overlay = created
+        return created.show()
+    }
+
+    /** Removes the floating bar. */
+    fun hideOverlay() {
+        overlay?.hide()
+    }
+
+    /** Tears the bar down entirely, e.g. when capture stops. */
+    fun destroyOverlay() {
+        overlay?.hide()
+        overlay = null
+    }
+
+    /** True while the bar is on screen. */
+    fun isOverlayVisible(): Boolean = overlay?.isVisible == true
+
+    /**
+     * Pushes new content into the floating bar. Each parameter is optional.
+     */
+    fun updateOverlay(
+        turn: String?,
+        status: String?,
+        evaluation: String?,
+        waiting: String?,
+        autoRunning: Boolean?,
+        autoEnabled: Boolean?,
+        scanEnabled: Boolean?
+    ) {
+        overlay?.update(
+            turn = turn,
+            status = status,
+            evaluation = evaluation,
+            waiting = waiting,
+            autoRunning = autoRunning,
+            autoEnabled = autoEnabled,
+            scanEnabled = scanEnabled
+        )
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* JS loop driver                                                      */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Starts calling `window.__lineConnectTick__()` every [intervalMs].
+     *
+     * The webview throttles its own timers once the activity is not visible, so
+     * the polling loop is driven from here instead.
+     */
+    fun startJsTick(intervalMs: Long) {
+        val interval = intervalMs.coerceIn(200L, 10000L)
+        val handler = tickHandler ?: Handler(Looper.getMainLooper()).also { tickHandler = it }
+        tickRunnable?.let { handler.removeCallbacks(it) }
+
+        val runnable = object : Runnable {
+            override fun run() {
+                tickCount++
+                MainActivity.dispatchJs(
+                    "if (window.__lineConnectTick__) { window.__lineConnectTick__(); }"
+                )
+                tickHandler?.postDelayed(this, interval)
+            }
+        }
+        tickRunnable = runnable
+        handler.postDelayed(runnable, interval)
+        Log.i(TAG, "JS tick started with interval ${interval}ms")
+    }
+
+    /** Stops the JS loop driver. */
+    fun stopJsTick() {
+        tickRunnable?.let { tickHandler?.removeCallbacks(it) }
+        tickRunnable = null
+        Log.i(TAG, "JS tick stopped (ticks so far: $tickCount)")
+    }
+
+    /** Number of ticks emitted since the service started. */
+    fun ticksSent(): Long = tickCount
+
     /** Sets the minimum interval between accepted frames. */
     fun setMinFrameInterval(intervalMs: Long) {
         minFrameIntervalMs = intervalMs.coerceIn(0L, 5000L)
@@ -299,6 +437,9 @@ class ScreenCaptureService : Service() {
     }
 
     private fun release(stopSelf: Boolean) {
+        stopJsTick()
+        destroyOverlay()
+
         try {
             imageReader?.setOnImageAvailableListener(null, null)
             imageReader?.close()

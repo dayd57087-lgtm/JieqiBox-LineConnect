@@ -39,6 +39,20 @@ export interface LineConnectBridge {
   captureStatus(): string
   hasAccessibility(): boolean
   openAccessibilitySettings(): void
+  /* Floating control bar (shown while other apps are in the foreground) */
+  canDrawOverlays(): boolean
+  showOverlay(): boolean
+  hideOverlay(): void
+  isOverlayVisible(): boolean
+  /** JSON payload with any of: turn, status, evaluation, waiting, autoRunning, autoEnabled, scanEnabled */
+  updateOverlay(json: string): boolean
+  /** Native loop driver: keeps the polling loop alive while the webview is hidden. */
+  startTick(intervalMs: number): boolean
+  stopTick(): void
+  /** Brings the app back to the foreground. */
+  bringToFront(): void
+  /** Opens the "display over other apps" system settings page. */
+  openOverlaySettings(): void
   tap(x: number, y: number, durationMs: number): boolean
   swipe(
     fromX: number,

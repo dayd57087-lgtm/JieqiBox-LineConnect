@@ -119,6 +119,12 @@ class LineConnectBridge(private val activity: MainActivity) {
         }
     }
 
+    /** Brings the app back to the foreground (floating bar "棋盘" action). */
+    @JavascriptInterface
+    fun bringToFront() {
+        activity.moveToFront()
+    }
+
     /** Performs a tap on the screen. */
     @JavascriptInterface
     fun tap(x: Double, y: Double, durationMs: Int): Boolean {
@@ -181,4 +187,103 @@ class LineConnectBridge(private val activity: MainActivity) {
             Log.w(TAG, "Failed to open overlay settings", e)
         }
     }
+
+    /* ------------------------------------------------------------------ */
+    /* Floating control bar                                                */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * True when the app may draw over other apps.
+     *
+     * On Android M+ this needs the user to flip a system switch; the app cannot
+     * request it with a runtime dialog like a normal permission.
+     */
+    @JavascriptInterface
+    fun canDrawOverlays(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        return activity.canDrawOverlaysNow()
+    }
+
+    /** Shows the floating bar. Requires the overlay permission. */
+    @JavascriptInterface
+    fun showOverlay(): Boolean {
+        val service = ScreenCaptureService.instance ?: return false
+        return service.ensureOverlay()
+    }
+
+    /** Hides the floating bar. */
+    @JavascriptInterface
+    fun hideOverlay() {
+        ScreenCaptureService.instance?.hideOverlay()
+    }
+
+    /** True while the bar is on screen. */
+    @JavascriptInterface
+    fun isOverlayVisible(): Boolean {
+        return ScreenCaptureService.instance?.isOverlayVisible() == true
+    }
+
+    /**
+     * Pushes new content into the floating bar.
+     *
+     * @param json object with any of: turn, status, evaluation, waiting,
+     *             autoRunning, autoEnabled, scanEnabled
+     * @return true when the payload was applied
+     */
+    @JavascriptInterface
+    fun updateOverlay(json: String): Boolean {
+        val service = ScreenCaptureService.instance ?: return false
+        return try {
+            val obj = JSONObject(json)
+            service.updateOverlay(
+                turn = obj.optStringOrNull("turn"),
+                status = obj.optStringOrNull("status"),
+                evaluation = obj.optStringOrNull("evaluation"),
+                waiting = obj.optStringOrNull("waiting"),
+                autoRunning = obj.optBooleanOrNull("autoRunning"),
+                autoEnabled = obj.optBooleanOrNull("autoEnabled"),
+                scanEnabled = obj.optBooleanOrNull("scanEnabled")
+            )
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "updateOverlay failed", e)
+            false
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Background JS loop driver                                           */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Starts driving `window.__lineConnectTick__()` from native code.
+     *
+     * A hidden webview throttles its own timers, so the loop would stall once
+     * the user switches to the game app. Ticks are emitted from the capture
+     * service instead, which keeps running in the foreground.
+     */
+    @JavascriptInterface
+    fun startTick(intervalMs: Int): Boolean {
+        val service = ScreenCaptureService.instance ?: return false
+        service.startJsTick(intervalMs.toLong())
+        return true
+    }
+
+    /** Stops the native loop driver. */
+    @JavascriptInterface
+    fun stopTick() {
+        ScreenCaptureService.instance?.stopJsTick()
+    }
+}
+
+/** Returns the string value or null when the key is absent. */
+private fun JSONObject.optStringOrNull(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    return optString(key)
+}
+
+/** Returns the boolean value or null when the key is absent. */
+private fun JSONObject.optBooleanOrNull(key: String): Boolean? {
+    if (!has(key) || isNull(key)) return null
+    return optBoolean(key)
 }
