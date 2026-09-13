@@ -1,4 +1,10 @@
 <resources>
-    <string name="app_name">JieqiBox</string>
-    <string name="main_activity_title">JieqiBox</string>
+    <string name="app_name">JieqiBox 连线</string>
+    <string name="main_activity_title">JieqiBox 连线</string>
+    <string name="line_connect_channel_name">连线自动走棋</string>
+    <string name="line_connect_channel_description">自动读取对局画面并落子时显示的常驻通知</string>
+    <string name="line_connect_notification_title">JieqiBox 连线自动走棋</string>
+    <string name="line_connect_notification_text">正在读取屏幕画面，用于识别棋盘</string>
+    <string name="accessibility_service_label">JieqiBox 自动走棋</string>
+    <string name="accessibility_service_description">开启后，JieqiBox 可以在其他象棋应用中代替你完成落子操作（连线自动走棋）。该服务仅用于发送点击与滑动手势，不会读取或上传你的屏幕内容。</string>
 </resources>

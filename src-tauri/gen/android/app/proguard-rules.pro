@@ -19,3 +19,19 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# ---------------------------------------------------------------------------
+# Line connect (连线自动走棋)
+# ---------------------------------------------------------------------------
+# Classes referenced from AndroidManifest.xml are kept automatically, but the
+# JavaScript bridge must keep every method reachable from the webview.
+-keepclassmembers class com.jieqibox.lineconnect.LineConnectBridge {
+    public *;
+}
+-keepclassmembers class com.jieqibox.lineconnect.MainActivity$SafFileInterface {
+    public *;
+}
+-keepclassmembers class com.jieqibox.lineconnect.MainActivity$ExternalUrlInterface {
+    public *;
+}
+-keep class com.jieqibox.lineconnect.ScreenCaptureService { *; }
+-keep class com.jieqibox.lineconnect.AutoPlayAccessibilityService { *; }

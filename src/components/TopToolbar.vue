@@ -62,6 +62,14 @@
         @click="showOpeningBookDialog = true"
         :title="$t('toolbar.openingBook')"
       />
+      <v-btn
+        icon="mdi-access-point-network"
+        size="small"
+        color="pink"
+        variant="text"
+        @click="showAutoPlayDialog = true"
+        :title="$t('toolbar.lineConnect')"
+      />
     </div>
 
     <div class="toolbar-center">
@@ -147,6 +155,7 @@
 
     <ReviewAnalysisDialog v-model="showReviewDialog" />
     <OpeningBookDialog v-model="showOpeningBookDialog" />
+    <AutoPlayDialog v-model="showAutoPlayDialog" />
   </div>
 </template>
 
@@ -161,6 +170,7 @@
   import NotationTextDialog from './NotationTextDialog.vue'
   import ReviewAnalysisDialog from './ReviewAnalysisDialog.vue'
   import OpeningBookDialog from './OpeningBookDialog.vue'
+  import AutoPlayDialog from './AutoPlayDialog.vue'
   import { useInterfaceSettings } from '../composables/useInterfaceSettings'
 
   const { t } = useI18n()
@@ -181,6 +191,7 @@
   const showNotationTextDialog = ref(false)
   const showReviewDialog = ref(false)
   const showOpeningBookDialog = ref(false)
+  const showAutoPlayDialog = ref(false)
 
   // State for variation restart logic
   const isWaitingToRestartForVariation = ref(false)

@@ -15,10 +15,10 @@ val tauriProperties = Properties().apply {
 
 android {
     compileSdk = 34
-    namespace = "com.jieqibox.app"
+    namespace = "com.jieqibox.lineconnect"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "com.jieqibox.app"
+        applicationId = "com.jieqibox.lineconnect"
         minSdk = 24
         targetSdk = 28
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()

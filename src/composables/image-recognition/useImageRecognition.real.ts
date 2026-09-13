@@ -4,6 +4,14 @@ import * as ort from 'onnxruntime-web'
 // Import types from the new file
 import { LABELS, type DetectionBox, type ProcessedImage } from './types'
 
+/**
+ * The ONNX session is expensive to build (tens of megabytes of weights), so it
+ * is shared between every consumer of this composable instead of being created
+ * once per component.
+ */
+let sharedSession: ort.InferenceSession | null = null
+let sharedSessionPromise: Promise<ort.InferenceSession> | null = null
+
 export const useImageRecognition = () => {
   const { t } = useI18n()
   const session = ref<ort.InferenceSession | null>(null)
@@ -19,6 +27,11 @@ export const useImageRecognition = () => {
   const initializeModel = async (): Promise<void> => {
     if (session.value) return
 
+    if (sharedSession) {
+      session.value = sharedSession
+      return
+    }
+
     try {
       isModelLoading.value = true
       status.value = t('positionEditor.imageRecognitionStatus.loadingModel')
@@ -26,13 +39,25 @@ export const useImageRecognition = () => {
       // ORT will load *.jsep.mjs / *.jsep.wasm etc. under this directory using default filenames
       const base = (import.meta as any).env?.BASE_URL || '/'
       ort.env.wasm.wasmPaths = base + 'ort/'
-      session.value = await ort.InferenceSession.create(
-        base + 'models/best.onnx',
-        {
-          executionProviders: ['wasm'],
-          graphOptimizationLevel: 'all',
-        }
-      )
+      if (!sharedSessionPromise) {
+        sharedSessionPromise = ort.InferenceSession.create(
+          base + 'models/best.onnx',
+          {
+            executionProviders: ['wasm'],
+            graphOptimizationLevel: 'all',
+          }
+        )
+          .then(created => {
+            sharedSession = created
+            return created
+          })
+          .catch(error => {
+            // Allow a later attempt to retry from scratch.
+            sharedSessionPromise = null
+            throw error
+          })
+      }
+      session.value = await sharedSessionPromise
       status.value = t(
         'positionEditor.imageRecognitionStatus.modelLoadedSuccessfully'
       )
@@ -513,6 +538,73 @@ export const useImageRecognition = () => {
     })
   }
 
+  // Run the model against an already decoded image element.
+  const runInference = async (
+    img: HTMLImageElement
+  ): Promise<DetectionBox[]> => {
+    inputImage.value = img
+
+    status.value = t('positionEditor.imageRecognitionStatus.preprocessingImage')
+    const prep = await preprocess(img)
+
+    status.value = t(
+      'positionEditor.imageRecognitionStatus.runningModelInference'
+    )
+    // More robust selection of input name (many exported YOLO models use 'images' as input name)
+    const inputName = session.value!.inputNames.includes('images')
+      ? 'images'
+      : session.value!.inputNames[0]
+    const feeds = { [inputName]: prep.tensor }
+    const results = await session.value!.run(feeds)
+
+    const firstOut = results.output0 || results[Object.keys(results)[0]]
+    const outputData = firstOut.data as unknown as number[]
+    const outShape = firstOut.dims as number[]
+
+    status.value = t(
+      'positionEditor.imageRecognitionStatus.postProcessingResults'
+    )
+    const boxes = postprocess(outputData, outShape, prep.meta)
+    detectedBoxes.value = boxes
+
+    status.value = t(
+      'positionEditor.imageRecognitionStatus.recognitionCompleted'
+    )
+
+    return boxes
+  }
+
+  /**
+   * Runs recognition against an image element that is already decoded.
+   *
+   * The line-connect (连线自动走棋) loop feeds screen captures here instead of
+   * going through the file picker.
+   */
+  const processImageElement = async (
+    img: HTMLImageElement
+  ): Promise<DetectionBox[]> => {
+    isProcessing.value = true
+    try {
+      status.value = t('positionEditor.imageRecognitionStatus.loadingImage')
+      await initializeModel()
+      return await runInference(img)
+    } catch (error) {
+      console.error('Image processing failed:', error)
+      status.value = t(
+        'positionEditor.imageRecognitionStatus.processingFailed',
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : t('positionEditor.imageRecognitionStatus.unknownError'),
+        }
+      )
+      throw error
+    } finally {
+      isProcessing.value = false
+    }
+  }
+
   // Process image recognition
   const processImage = async (file: File): Promise<void> => {
     try {
@@ -532,36 +624,7 @@ export const useImageRecognition = () => {
         img.src = imageUrl
       })
 
-      inputImage.value = img
-
-      status.value = t(
-        'positionEditor.imageRecognitionStatus.preprocessingImage'
-      )
-      const prep = await preprocess(img)
-
-      status.value = t(
-        'positionEditor.imageRecognitionStatus.runningModelInference'
-      )
-      // More robust selection of input name (many exported YOLO models use 'images' as input name)
-      const inputName = session.value!.inputNames.includes('images')
-        ? 'images'
-        : session.value!.inputNames[0]
-      const feeds = { [inputName]: prep.tensor }
-      const results = await session.value!.run(feeds)
-
-      const firstOut = results.output0 || results[Object.keys(results)[0]]
-      const outputData = firstOut.data as unknown as number[]
-      const outShape = firstOut.dims as number[]
-
-      status.value = t(
-        'positionEditor.imageRecognitionStatus.postProcessingResults'
-      )
-      const boxes = postprocess(outputData, outShape, prep.meta)
-      detectedBoxes.value = boxes
-
-      status.value = t(
-        'positionEditor.imageRecognitionStatus.recognitionCompleted'
-      )
+      await runInference(img)
 
       // Do not revoke immediately; keep the blob URL while the image is displayed
     } catch (error) {
@@ -579,6 +642,14 @@ export const useImageRecognition = () => {
     } finally {
       isProcessing.value = false
     }
+  }
+
+  const getBoardBox = (boxes: DetectionBox[]): DetectionBox | null => {
+    return (
+      boxes
+        .filter(b => LABELS[b.labelIndex]?.name === 'Board')
+        .sort((a, b) => b.score - a.score)[0] ?? null
+    )
   }
 
   // Update board grid
@@ -650,6 +721,8 @@ export const useImageRecognition = () => {
     outputCanvas,
     showBoundingBoxes,
     processImage,
+    processImageElement,
+    getBoardBox,
     drawBoundingBoxes,
     updateBoardGrid,
     initializeModel,

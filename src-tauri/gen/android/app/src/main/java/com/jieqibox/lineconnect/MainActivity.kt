@@ -1,14 +1,17 @@
-package com.jieqibox.app
+package com.jieqibox.lineconnect
 
 import android.app.Activity
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.io.FileOutputStream
@@ -21,7 +24,14 @@ class MainActivity : TauriActivity() {
     
     // Store the current SAF request data
     private var currentSafRequest: Map<String, String>? = null
-    
+
+    // Screen capture token granted by the user for the line-connect feature.
+    // Android only allows a single use per grant, so it is cleared once consumed.
+    private var pendingProjectionResultCode: Int = 0
+    private var pendingProjectionData: Intent? = null
+
+    private val lineConnectBridge by lazy { LineConnectBridge(this) }
+
     // Activity result launcher for SAF file selection
     private val safFileSelectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -47,6 +57,24 @@ class MainActivity : TauriActivity() {
         // Clear the current request after handling
         currentSafRequest = null
     }
+
+    // Activity result launcher for the MediaProjection permission dialog
+    private val projectionPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            pendingProjectionResultCode = result.resultCode
+            pendingProjectionData = data
+            Log.i(TAG, "Screen capture permission granted")
+            dispatchProjectionPermissionResult(true, "granted")
+        } else {
+            pendingProjectionResultCode = 0
+            pendingProjectionData = null
+            Log.w(TAG, "Screen capture permission denied")
+            dispatchProjectionPermissionResult(false, "denied")
+        }
+    }
     
     override fun onWebViewCreate(webView: WebView) {
         super.onWebViewCreate(webView)
@@ -55,6 +83,9 @@ class MainActivity : TauriActivity() {
         
         // Listen for external URL opening events from Tauri
         webView.addJavascriptInterface(ExternalUrlInterface(), "ExternalUrlInterface")
+
+        // Line connect (连线自动走棋) bridge
+        webView.addJavascriptInterface(lineConnectBridge, "LineConnect")
         
         // Listen for Tauri events
         setupTauriEventListeners()
@@ -245,5 +276,94 @@ class MainActivity : TauriActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Error opening external URL: $url", e)
         }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Line connect: screen capture plumbing                               */
+    /* ------------------------------------------------------------------ */
+
+    /** True when a screen capture token is available for the capture service. */
+    fun hasPendingProjection(): Boolean = pendingProjectionData != null
+
+    /** Discards the stored screen capture token. */
+    fun clearProjectionPermission() {
+        pendingProjectionData = null
+        pendingProjectionResultCode = 0
+    }
+
+    /** Shows the system screen capture consent dialog. */
+    fun requestProjectionPermission() {
+        runOnUiThread {
+            try {
+                val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                projectionPermissionLauncher.launch(manager.createScreenCaptureIntent())
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to request screen capture permission", e)
+                dispatchProjectionPermissionResult(false, "error: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Starts the foreground capture service with the stored token.
+     *
+     * @return true when the service was launched.
+     */
+    fun startProjectionService(scale: Float, quality: Int, intervalMs: Long): Boolean {
+        val data = pendingProjectionData
+        if (data == null) {
+            Log.w(TAG, "startProjectionService called without a valid token")
+            return false
+        }
+        return try {
+            val intent = Intent(this, ScreenCaptureService::class.java).apply {
+                putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, pendingProjectionResultCode)
+                putExtra(ScreenCaptureService.EXTRA_DATA, data)
+                putExtra(ScreenCaptureService.EXTRA_SCALE, scale)
+                putExtra(ScreenCaptureService.EXTRA_QUALITY, quality)
+                putExtra(ScreenCaptureService.EXTRA_INTERVAL_MS, intervalMs)
+            }
+            ContextCompat.startForegroundService(this, intent)
+            // A projection token can only be consumed once.
+            clearProjectionPermission()
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start capture service", e)
+            false
+        }
+    }
+
+    /** Stops the capture service if it is running. */
+    fun stopProjectionService() {
+        try {
+            ScreenCaptureService.instance?.stopCapture()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to stop capture service", e)
+        }
+    }
+
+    private fun dispatchProjectionPermissionResult(granted: Boolean, reason: String) {
+        val jsCode = "window.dispatchEvent(new CustomEvent('line-connect-projection', " +
+            "{ detail: { granted: $granted, reason: '${reason.replace("'", "\\'")}' } }));"
+        runOnUiThread {
+            webView?.evaluateJavascript(jsCode, null)
+        }
+    }
+
+    /** Best-effort foreground package lookup, preferring the accessibility service. */
+    fun currentForegroundPackage(): String {
+        val service = AutoPlayAccessibilityService.instance
+        try {
+            val pkg = service?.rootInActiveWindow?.packageName?.toString()
+            if (!pkg.isNullOrEmpty()) return pkg
+        } catch (_: Exception) {
+            // fall through
+        }
+        return ""
+    }
+
+    override fun onDestroy() {
+        stopProjectionService()
+        super.onDestroy()
     }
 }

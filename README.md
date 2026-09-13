@@ -35,6 +35,7 @@ Meet Reva-chan, the official mascot for JieqiBox~ We hope she makes your journey
 - Visual board editor and complete move history
 - Clean, responsive interface (Vuetify 3)
 - Built-in localisation (简体中文, 繁體中文, English, Tiếng Việt, 日本語)
+- **连线自动走棋** (Android) — 截屏识别对弈平台画面，交给引擎分析并自动落子，见 [docs/line-connect.md](./docs/line-connect.md)
 
 ---
 
