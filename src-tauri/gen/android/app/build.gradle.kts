@@ -64,6 +64,10 @@ rust {
 
 dependencies {
     implementation("androidx.webkit:webkit:1.6.1")
+    // DocumentFile is used by MainActivity for SAF engine file picking.
+    // It used to arrive transitively through appcompat; declare it explicitly
+    // so the build does not depend on resolution of transitive dependencies.
+    implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.8.0")
     testImplementation("junit:junit:4.13.2")

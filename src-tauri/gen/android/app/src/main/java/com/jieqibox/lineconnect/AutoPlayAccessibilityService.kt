@@ -8,7 +8,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
-import androidx.annotation.RequiresApi
 
 /**
  * Accessibility service used by the "line connect" (连线自动走棋) feature to
@@ -64,7 +63,10 @@ class AutoPlayAccessibilityService : AccessibilityService() {
     /**
      * Performs a single tap at the given screen coordinates.
      *
-     * @return true when the gesture was dispatched successfully.
+     * Called from the webview bridge, which runs on a background thread, so the
+     * gesture is always posted to the main thread.
+     *
+     * @return true when the gesture was accepted for dispatch.
      */
     fun tap(x: Float, y: Float, durationMs: Long = 50L): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
@@ -72,7 +74,7 @@ class AutoPlayAccessibilityService : AccessibilityService() {
             return false
         }
         val path = Path().apply { moveTo(x, y) }
-        return dispatchPath(path, durationMs)
+        return dispatchOnMain(path, durationMs)
     }
 
     /**
@@ -93,10 +95,18 @@ class AutoPlayAccessibilityService : AccessibilityService() {
             moveTo(fromX, fromY)
             lineTo(toX, toY)
         }
-        return dispatchPath(path, durationMs)
+        return dispatchOnMain(path, durationMs)
     }
 
-    @RequiresApi(Build.VERSION_CODES.N)
+    /** Dispatches on the main thread, no matter which thread the caller is on. */
+    private fun dispatchOnMain(path: Path, durationMs: Long): Boolean {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return dispatchPath(path, durationMs)
+        }
+        mainHandler.post { dispatchPath(path, durationMs) }
+        return true
+    }
+
     private fun dispatchPath(path: Path, durationMs: Long): Boolean {
         val safeDuration = durationMs.coerceIn(20L, 4000L)
         return try {

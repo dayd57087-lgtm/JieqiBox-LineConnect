@@ -11,7 +11,6 @@ import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.io.FileOutputStream
@@ -323,7 +322,11 @@ class MainActivity : TauriActivity() {
                 putExtra(ScreenCaptureService.EXTRA_QUALITY, quality)
                 putExtra(ScreenCaptureService.EXTRA_INTERVAL_MS, intervalMs)
             }
-            ContextCompat.startForegroundService(this, intent)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
             // A projection token can only be consumed once.
             clearProjectionPermission()
             true
