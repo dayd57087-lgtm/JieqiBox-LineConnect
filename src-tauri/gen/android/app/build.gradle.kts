@@ -13,6 +13,35 @@ val tauriProperties = Properties().apply {
     }
 }
 
+/**
+ * App version, read from tauri.conf.json.
+ *
+ * The Tauri CLI only writes `tauri.properties` during `tauri android init`, which
+ * the CI never runs, so that file is absent there and the version used to fall
+ * back to the hard-coded "1.0" / versionCode 1 for every release - making it
+ * impossible to tell which build is installed. Reading the config directly keeps
+ * the installed version in step with the release.
+ */
+val tauriConfFile = file("../../../tauri.conf.json")
+
+val appVersion: String = if (tauriConfFile.exists()) {
+    Regex("\"version\"\\s*:\\s*\"([^\"]+)\"")
+        .find(tauriConfFile.readText())
+        ?.groupValues
+        ?.get(1)
+        ?: "1.0"
+} else {
+    "1.0"
+}
+
+val versionParts = appVersion.split(".").map { it.toIntOrNull() ?: 0 }
+
+/** 0.8.1 -> 801, i.e. monotonic so upgrades install as upgrades. */
+val appVersionCode: Int =
+    versionParts.getOrElse(0) { 0 } * 10000 +
+        versionParts.getOrElse(1) { 0 } * 100 +
+        versionParts.getOrElse(2) { 0 }
+
 android {
     compileSdk = 34
     namespace = "com.jieqibox.lineconnect"
@@ -21,8 +50,10 @@ android {
         applicationId = "com.jieqibox.lineconnect"
         minSdk = 24
         targetSdk = 28
-        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
-        versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        versionCode = tauriProperties
+            .getProperty("tauri.android.versionCode")
+            ?.toIntOrNull() ?: appVersionCode
+        versionName = tauriProperties.getProperty("tauri.android.versionName", appVersion)
     }
     buildTypes {
         getByName("debug") {
