@@ -37,6 +37,13 @@ jobs:
       - name: Check TypeScript
         run: npm run build
 
+      - name: Offline logic checks (line connect)
+        run: |
+          npx esbuild tools/test-boardFen.ts --bundle --platform=node --format=esm --outfile=/tmp/test-boardFen.mjs
+          node /tmp/test-boardFen.mjs
+          npx esbuild tools/test-grid.ts --bundle --platform=node --format=esm --outfile=/tmp/test-grid.mjs
+          node /tmp/test-grid.mjs
+
       - name: Install Clippy
         run: rustup component add clippy
 

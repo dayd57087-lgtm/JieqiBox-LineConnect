@@ -5,6 +5,7 @@ import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -39,9 +40,23 @@ class ChessboardOverlay(private val context: Context) {
 
         private const val MIN_SIZE_DP = 150
         private const val MOVE_SLOP_DP = 4
+
+        /** Key used to publish this window's screen rectangle. */
+        private const val BOUNDS_KEY = "chessboard"
+
+        /** How often the screen rectangle is re-published while visible. */
+        private const val BOUNDS_INTERVAL_MS = 700L
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val boundsHandler = Handler(Looper.getMainLooper())
+    private val boundsRunnable = object : Runnable {
+        override fun run() {
+            refreshBounds()
+            if (root != null) boundsHandler.postDelayed(this, BOUNDS_INTERVAL_MS)
+        }
+    }
 
     private var root: FrameLayout? = null
     private var board: XiangqiBoardView? = null
@@ -95,6 +110,7 @@ class ChessboardOverlay(private val context: Context) {
                     bestMove = pendingBest
                     lastMove = pendingLast
                 }
+                startBoundsTracking()
                 added = true
                 Log.i(TAG, "Chessboard shown")
             } catch (e: Exception) {
@@ -112,11 +128,35 @@ class ChessboardOverlay(private val context: Context) {
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to remove chessboard view", e)
             }
+            stopBoundsTracking()
             root = null
             params = null
             board = null
             Log.i(TAG, "Chessboard hidden")
         }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Screen bounds reporting                                             */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Publishes this window's rectangle so the recognition loop can ignore the
+     * board it draws itself (the capture mirrors the whole screen).
+     */
+    private fun startBoundsTracking() {
+        refreshBounds()
+        boundsHandler.removeCallbacks(boundsRunnable)
+        boundsHandler.postDelayed(boundsRunnable, BOUNDS_INTERVAL_MS)
+    }
+
+    private fun stopBoundsTracking() {
+        boundsHandler.removeCallbacks(boundsRunnable)
+        OverlayRegistry.remove(BOUNDS_KEY)
+    }
+
+    private fun refreshBounds() {
+        OverlayRegistry.update(BOUNDS_KEY, root)
     }
 
     /** Updates the rendered position. Also works before the board is shown. */
@@ -284,6 +324,7 @@ class ChessboardOverlay(private val context: Context) {
             val view = root ?: return
             val lp = params ?: return
             windowManager?.updateViewLayout(view, lp)
+            refreshBounds()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update chessboard layout", e)
         }
@@ -348,6 +389,18 @@ class XiangqiBoardView(context: Context) : View(context) {
         private const val RIVER_LEFT = "\u695A\u6CB3"
         private const val RIVER_RIGHT = "\u6C49\u754C"
 
+        /**
+         * Alphas of the halo drawn under the engine arrow.
+         *
+         * A real [android.graphics.BlurMaskFilter] is ignored on a hardware
+         * accelerated canvas, so the glow is emulated with three progressively
+         * wider strokes - the same trick the main board's SVG uses with its
+         * double drop-shadow.
+         */
+        private const val GLOW_ALPHA_OUTER = 0x1F
+        private const val GLOW_ALPHA_MIDDLE = 0x33
+        private const val GLOW_ALPHA_INNER = 0x4D
+
         /** FEN letter -> index into the glyph arrays. */
         private val LETTER_INDEX = mapOf(
             'K' to 0, 'A' to 1, 'B' to 2, 'N' to 3, 'R' to 4, 'C' to 5, 'P' to 6
@@ -387,14 +440,22 @@ class XiangqiBoardView(context: Context) : View(context) {
         textAlign = Paint.Align.CENTER
     }
     private val bestArrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xE62962FF.toInt()
+        color = 0xF2E53935.toInt()
         style = Paint.Style.FILL_AND_STROKE
         strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val bestArrowGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xE53935
+        style = Paint.Style.FILL_AND_STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
     }
     private val lastArrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xB0FFB300.toInt()
+        color = 0xA6909FB0.toInt()
         style = Paint.Style.FILL_AND_STROKE
         strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
     }
 
     /** Cells[row][col] holds the FEN letter, or '\u0000' when empty. */
@@ -526,12 +587,34 @@ class XiangqiBoardView(context: Context) : View(context) {
             }
         }
 
-        // Arrows last so they sit above the pieces.
+        // Arrows last so they sit above the pieces, exactly like the reference
+        // style used in the app itself (red suggestion with a soft halo).
         val shaft = Math.min(cellW, cellH) * 0.16f
-        drawArrow(canvas, left, top, cellW, cellH, lastMove, lastArrowPaint, shaft, radius)
-        drawArrow(canvas, left, top, cellW, cellH, bestMove, bestArrowPaint, shaft * 1.35f, radius)
+        drawArrow(
+            canvas, left, top, cellW, cellH, lastMove, lastArrowPaint,
+            shaft * 0.62f, cellW * 0.26f, cellW * 0.26f, cellW * 0.04f
+        )
+        // Halo layers first: a real blur is not available on a hardware canvas,
+        // three progressively wider strokes read as the same soft glow.
+        val glow = bestArrowGlowPaint
+        glow.alpha = GLOW_ALPHA_OUTER
+        drawArrow(canvas, left, top, cellW, cellH, bestMove, glow, shaft * 2.9f, cellW * 0.5f, cellW * 0.52f, cellW * 0.12f)
+        glow.alpha = GLOW_ALPHA_MIDDLE
+        drawArrow(canvas, left, top, cellW, cellH, bestMove, glow, shaft * 1.9f, cellW * 0.46f, cellW * 0.46f, cellW * 0.12f)
+        glow.alpha = GLOW_ALPHA_INNER
+        drawArrow(canvas, left, top, cellW, cellH, bestMove, glow, shaft * 1.25f, cellW * 0.44f, cellW * 0.43f, cellW * 0.12f)
+        drawArrow(canvas, left, top, cellW, cellH, bestMove, bestArrowPaint, shaft, cellW * 0.43f, cellW * 0.41f, cellW * 0.12f)
     }
 
+    /**
+     * Draws one move arrow.
+     *
+     * Geometry follows the arrow style used on the main board: the tail starts at
+     * the centre of the origin square, the tip overshoots the target centre a
+     * little (it is meant to end up on top of the piece that moved/ will move
+     * there), the shaft is about a sixth of a cell wide and the head about 0.4 of
+     * a cell in both directions.
+     */
     private fun drawArrow(
         canvas: Canvas,
         left: Float,
@@ -541,7 +624,9 @@ class XiangqiBoardView(context: Context) : View(context) {
         uci: String,
         paint: Paint,
         shaft: Float,
-        radius: Float
+        headLength: Float,
+        headWidth: Float,
+        tipOvershoot: Float
     ) {
         if (uci.length < 4) return
         val from = uciSquare(uci, 0) ?: return
@@ -559,27 +644,18 @@ class XiangqiBoardView(context: Context) : View(context) {
         val ux = dx / len
         val uy = dy / len
 
-        // Stop short of the target square centre so the head does not cover the
-        // piece that just moved there.
-        val tipInset = radius * 0.55f
-        val tailInset = radius * 0.75f
-        val sx = x1 + ux * tailInset
-        val sy = y1 + uy * tailInset
-        val ex = x2 - ux * tipInset
-        val ey = y2 - uy * tipInset
-
-        val headLen = Math.max(shaft * 2.6f, radius * 0.85f)
-        val headWidth = Math.max(shaft * 2.2f, radius * 0.75f)
-        val baseX = ex - ux * headLen
-        val baseY = ey - uy * headLen
+        // Tip sits a little past the target centre so it lands on the piece.
+        val ex = x2 + ux * tipOvershoot
+        val ey = y2 + uy * tipOvershoot
+        val baseX = ex - ux * headLength
+        val baseY = ey - uy * headLength
 
         paint.strokeWidth = shaft
-        canvas.drawLine(sx, sy, baseX, baseY, paint)
+        canvas.drawLine(x1, y1, baseX, baseY, paint)
 
-        // Perpendicular for the head triangle.
         val px = -uy
         val py = ux
-        val path = android.graphics.Path()
+        val path = Path()
         path.moveTo(ex, ey)
         path.lineTo(baseX + px * headWidth / 2f, baseY + py * headWidth / 2f)
         path.lineTo(baseX - px * headWidth / 2f, baseY - py * headWidth / 2f)

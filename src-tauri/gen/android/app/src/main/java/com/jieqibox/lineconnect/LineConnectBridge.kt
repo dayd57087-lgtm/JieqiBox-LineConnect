@@ -118,6 +118,27 @@ class LineConnectBridge(private val activity: MainActivity) {
         return ScreenCaptureService.instance?.frameChangeRatio() ?: 1.0
     }
 
+    /**
+     * Rectangles of our own floating windows, in screen pixels, as JSON.
+     *
+     * They are captured by the record mirror like everything else on screen, so
+     * the recognition layer uses them to ignore the chessboard it draws itself.
+     */
+    @JavascriptInterface
+    fun overlayRects(): String {
+        val builder = StringBuilder("[")
+        OverlayRegistry.snapshot().forEachIndexed { index, rect ->
+            if (index > 0) builder.append(',')
+            builder
+                .append("{\"left\":").append(rect.left)
+                .append(",\"top\":").append(rect.top)
+                .append(",\"width\":").append(rect.width())
+                .append(",\"height\":").append(rect.height())
+                .append('}')
+        }
+        return builder.append(']').toString()
+    }
+
     /* ------------------------------------------------------------------ */
     /* Floating chessboard                                                 */
     /* ------------------------------------------------------------------ */
@@ -383,7 +404,8 @@ class LineConnectBridge(private val activity: MainActivity) {
                 connectRunning = obj.optBooleanOrNull("connectRunning"),
                 autoPlay = obj.optBooleanOrNull("autoPlay"),
                 autoEnabled = obj.optBooleanOrNull("autoEnabled"),
-                boardVisible = obj.optBooleanOrNull("boardVisible")
+                boardVisible = obj.optBooleanOrNull("boardVisible"),
+                side = obj.optStringOrNull("side")
             )
             true
         } catch (e: Exception) {

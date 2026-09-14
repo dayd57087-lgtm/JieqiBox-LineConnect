@@ -56,18 +56,116 @@ export function emptyGrid(): Grid {
   )
 }
 
-/** Maps a detection to its FEN character, or null when it is not a piece. */
-export function labelToChar(box: DetectionBox): string | null {
+/** True for every label that means "hidden piece". */
+export function isDarkLabel(box: DetectionBox | null | undefined): boolean {
+  if (!box) return false
+  const label = LABELS[box.labelIndex]?.name
+  if (!label) return false
+  return label === 'dark' || label.startsWith('dark_')
+}
+
+/**
+ * Maps a detection to its FEN character, or null when it is not a piece.
+ *
+ * Hidden pieces are the tricky case. On the board they are all drawn as the very
+ * same blank disc, so no classifier can tell which colour is underneath - the
+ * `dark_r_*` / `dark_b_*` labels are pure noise and are ignored on purpose.
+ *
+ * A hidden piece cannot cross the river before it is revealed (moving it is what
+ * reveals it), so it always sits on its owner's half of the board. The row is
+ * therefore the only trustworthy colour signal, which is exactly what
+ * {@link hiddenCharForRow} encodes.
+ *
+ * @param row the lattice row the piece was mapped to (0 = black back rank)
+ */
+export function labelToChar(box: DetectionBox, row: number): string | null {
   const label = LABELS[box.labelIndex]?.name
   if (!label) return null
   const revealed = CHAR_BY_LABEL[label]
   if (revealed) return revealed
-  if (label === 'dark') return 'X'
-  if (label.startsWith('dark_')) {
-    // dark_r_* / dark_b_* encode the colour of the hidden piece.
-    return label.startsWith('dark_r') ? 'X' : 'x'
-  }
+  if (label === 'dark' || label.startsWith('dark_')) return hiddenCharForRow(row)
   return null
+}
+
+/**
+ * Side a lattice cell belongs to, using the same rule as {@link labelToChar}:
+ * revealed pieces by case, hidden pieces by row.
+ */
+export function sideAtCell(
+  grid: Grid | null | undefined,
+  row: number,
+  col: number
+): 'w' | 'b' | null {
+  if (row < 0 || row >= BOARD_ROWS || col < 0 || col >= BOARD_COLS) return null
+  const box = grid?.[row]?.[col] ?? null
+  if (!box) return null
+  const ch = labelToChar(box, row)
+  if (!ch) return null
+  return charSide(ch)
+}
+
+/**
+ * Colour of the side that owns the piece that just moved between two
+ * observations, or null when the difference is ambiguous.
+ *
+ * Used to identify our colour without relying on the "the side to move
+ * alternates" assumption: the piece that disappeared tells us who moved.
+ */
+export function inferMoverSide(
+  previous: Grid,
+  current: Grid
+): { mover: 'w' | 'b'; from: { row: number; col: number }; to: { row: number; col: number } } | null {
+  const move = findMoveBetweenGrids(previous, current)
+  if (!move) return null
+  const mover = sideAtCell(previous, move.from.row, move.from.col)
+  if (!mover) return null
+  return { mover, from: move.from, to: move.to }
+}
+
+/**
+ * Locates the single move that separates two observed positions.
+ *
+ * Returns null unless the difference is unambiguous (exactly one square was
+ * vacated and exactly one square was filled or replaced), which keeps detection
+ * noise from being mistaken for a move.
+ */
+export function findMoveBetweenGrids(
+  previous: Grid,
+  current: Grid
+): { from: { row: number; col: number }; to: { row: number; col: number } } | null {
+  const vacated: { row: number; col: number }[] = []
+  const filled: { row: number; col: number }[] = []
+
+  for (let row = 0; row < BOARD_ROWS; row++) {
+    for (let col = 0; col < BOARD_COLS; col++) {
+      const before = previous?.[row]?.[col] ?? null
+      const after = current?.[row]?.[col] ?? null
+      if (before && !after) vacated.push({ row, col })
+      else if (!before && after) filled.push({ row, col })
+      else if (before && after && before.labelIndex !== after.labelIndex) {
+        // A capture or a reveal: the square held something else before.
+        filled.push({ row, col })
+      }
+    }
+  }
+
+  if (vacated.length !== 1 || filled.length !== 1) return null
+  return { from: vacated[0], to: filled[0] }
+}
+
+/**
+ * Whether a move actually landed on the board.
+ *
+ * The simplest reliable check is that the square the piece came from is now
+ * empty. A tap that missed leaves the original position untouched, which is how
+ * "the engine keeps suggesting the same move and nothing happens" used to look.
+ */
+export function moveLanded(
+  gridAfter: Grid,
+  expected: { from: { row: number; col: number }; to: { row: number; col: number } }
+): boolean {
+  const from = gridAfter?.[expected.from.row]?.[expected.from.col] ?? null
+  return from === null
 }
 
 export function isHiddenChar(ch: string): boolean {
@@ -76,6 +174,19 @@ export function isHiddenChar(ch: string): boolean {
 
 export function isRedChar(ch: string): boolean {
   return ch === ch.toUpperCase() && ch !== 'X'
+}
+
+/**
+ * Colour of a FEN character.
+ *
+ * Note that this is not [isRedChar]: the hidden-piece token `X` is uppercase but
+ * `isRedChar` deliberately excludes it (it is only meaningful for revealed
+ * pieces), while here `X` really does mean a red hidden piece.
+ */
+export function charSide(ch: string): 'w' | 'b' {
+  if (ch === 'X') return 'w'
+  if (ch === 'x') return 'b'
+  return ch === ch.toUpperCase() ? 'w' : 'b'
 }
 
 export function hiddenCharForRow(row: number): string {
@@ -207,9 +318,47 @@ export function isStartPosition(grid: Grid): boolean {
 
   // The generals must be on their own back rank; they are the only pieces that
   // are revealed from the very first move.
-  const blackKing = labelToChar(grid[0][4]!)
-  const redKing = labelToChar(grid[9][4]!)
+  const blackKing = labelToChar(grid[0][4]!, 0)
+  const redKing = labelToChar(grid[9][4]!, 9)
   return blackKing === 'k' && redKing === 'K'
+}
+
+/**
+ * Which way round the captured board is drawn.
+ *
+ * `normal` is the canonical layout (black at the top, red at the bottom) that
+ * the rest of the app assumes. Many playing apps flip the board when the user
+ * plays black, and feeding a mirrored position to the engine produces mirrored
+ * moves - which is why this is checked on every pass.
+ *
+ * Only the generals are used: they are revealed from move one and never leave
+ * their own palace, so their half of the board is a stable signal.
+ */
+export function detectOrientation(grid: Grid): 'normal' | 'flipped' | null {
+  let redRow = -1
+  let blackRow = -1
+  for (let row = 0; row < BOARD_ROWS; row++) {
+    for (let col = 0; col < BOARD_COLS; col++) {
+      const ch = grid?.[row]?.[col] ? labelToChar(grid[row][col]!, row) : null
+      if (ch === 'K') redRow = row
+      else if (ch === 'k') blackRow = row
+    }
+  }
+  if (redRow < 0 && blackRow < 0) return null
+  if (redRow >= 7 && (blackRow < 0 || blackRow <= 2)) return 'normal'
+  if (redRow >= 0 && redRow <= 2 && (blackRow < 0 || blackRow >= 7)) return 'flipped'
+  return null
+}
+
+/** Rotates a grid by 180 degrees (row and col), i.e. undoes a flipped board. */
+export function mirrorGrid(grid: Grid): Grid {
+  const out = emptyGrid()
+  for (let row = 0; row < BOARD_ROWS; row++) {
+    for (let col = 0; col < BOARD_COLS; col++) {
+      out[BOARD_ROWS - 1 - row][BOARD_COLS - 1 - col] = grid[row][col]
+    }
+  }
+  return out
 }
 
 /* ------------------------------------------------------------------------- */
@@ -276,7 +425,7 @@ export function buildJieqiFen(
       const box = grid?.[row]?.[col] ?? null
       let ch = '.'
       if (box && box.score >= minScore) {
-        const mapped = labelToChar(box)
+        const mapped = labelToChar(box, row)
         if (mapped) {
           ch = mapped
         } else if (box.score >= minScore) {
@@ -341,54 +490,278 @@ export function fenPositionKey(fen: string): string {
   return parts.slice(0, 2).join(' ')
 }
 
-/**
- * Builds the grid from a detection pass that was run on a tight crop of the
- * board.
- *
- * Because the crop is already aligned to the board's bounding box, the piece
- * position inside the crop maps linearly onto the 9x10 lattice; no `Board`
- * detection (and no bilinear quad) is needed. This is both faster and more
- * accurate than the full-frame path.
- */
-export function gridFromBoardCrop(
-  boxes: DetectionBox[],
-  cropWidth: number,
-  cropHeight: number,
-  minScore = 0
-): { grid: Grid; overlaps: number } {
-  const grid = emptyGrid()
-  let overlaps = 0
+/* ------------------------------------------------------------------------- */
+/* Grid construction with lattice self-calibration                           */
+/* ------------------------------------------------------------------------- */
 
-  if (cropWidth <= 0 || cropHeight <= 0) {
-    return { grid, overlaps }
+/** Result of a one dimensional lattice fit. */
+export interface LatticeFit {
+  /** Spacing that best explains the observed centres, in pixels. */
+  step: number
+  /** Where the lattice points sit, modulo `step`. */
+  phase: number
+  /** How well the points line up (1 = perfect, 0 = random). */
+  score: number
+  /** Mean distance from a centre to its lattice point, in cells. */
+  residual: number
+}
+
+/**
+ * Fits a regular lattice to a set of coordinates.
+ *
+ * Piece centres always sit on integer lattice points, so their spacing can be
+ * measured directly instead of being derived from the detected board box. This
+ * matters because the `Board` box usually covers the whole wooden board with a
+ * margin, which makes the naive mapping drift by most of a cell at the edges -
+ * a left-flank piece then lands on the wrong column and the whole line of play
+ * falls apart.
+ *
+ * The search is confined to +/-`range` around `expectedStep`, which keeps the
+ * aliases at half and double the true step out of reach, and a mild pull towards
+ * `expectedStep` breaks ties when only a few points are available.
+ *
+ * Returns null when the points cannot support a conclusion (too few, all bunched
+ * together, or no convincing alignment), in which case the caller keeps the
+ * box based mapping.
+ */
+export function fitLattice(
+  values: number[],
+  expectedStep: number,
+  range = 0.25
+): LatticeFit | null {
+  if (values.length < 3 || !(expectedStep > 0)) return null
+
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  // Points that all sit on one line carry no information about the spacing.
+  if (max - min < expectedStep * 1.2) return null
+
+  const lo = expectedStep * (1 - range)
+  const hi = expectedStep * (1 + range)
+  const steps = 300
+
+  let bestStep = 0
+  let bestScore = -1
+  for (let i = 0; i <= steps; i++) {
+    const s = lo + ((hi - lo) * i) / steps
+    let cx = 0
+    let cy = 0
+    for (const v of values) {
+      const phase = (v % s) / s
+      const angle = 2 * Math.PI * phase
+      cx += Math.cos(angle)
+      cy += Math.sin(angle)
+    }
+    // Circular concentration: 1 when every centre sits on the same lattice
+    // phase, ~0 when they are spread evenly.
+    const concentration = Math.hypot(cx, cy) / values.length
+    // Nudge towards the expected spacing so a near-alias cannot win by a hair.
+    const penalty = 1 - 0.6 * Math.abs(s / expectedStep - 1)
+    const score = concentration * penalty
+    if (score > bestScore) {
+      bestScore = score
+      bestStep = s
+    }
   }
 
+  if (bestStep <= 0 || bestScore < 0.75) return null
+
+  // Circular mean phase of the winning spacing.
+  let cx = 0
+  let cy = 0
+  for (const v of values) {
+    const angle = (2 * Math.PI * (v % bestStep)) / bestStep
+    cx += Math.cos(angle)
+    cy += Math.sin(angle)
+  }
+  const meanAngle = Math.atan2(cy, cx)
+  let phase = ((meanAngle / (2 * Math.PI)) * bestStep) % bestStep
+  if (phase < 0) phase += bestStep
+
+  let residualSum = 0
+  for (const v of values) {
+    const off = (((v - phase) / bestStep) % 1 + 1) % 1
+    residualSum += Math.min(off, 1 - off)
+  }
+
+  return {
+    step: bestStep,
+    phase,
+    score: bestScore,
+    residual: residualSum / values.length,
+  }
+}
+
+/** Board region inside an analysed image, in that image's pixels. */
+export interface BoardRegion {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+export interface GridBuildResult {
+  grid: Grid
+  boardBox: DetectionBox | null
+  /** Lattice geometry in the analysed image's pixels. */
+  lattice: { originX: number; originY: number; stepX: number; stepY: number }
+  /** Pieces the model found that could not be placed on a lattice point. */
+  offLattice: number
+  /** Squares two detections fought over. */
+  overlaps: number
+  /** How many detections were dropped because our own overlay covered them. */
+  masked: number
+  calibration: {
+    used: boolean
+    stepX: number
+    stepY: number
+    residualX: number
+    residualY: number
+    scoreX: number
+    scoreY: number
+  }
+}
+
+/**
+ * Turns raw detections into the 10x9 lattice.
+ *
+ * Two things happen here that the previous implementation got wrong:
+ *
+ * 1. the lattice is re-fitted from the piece centres instead of being assumed to
+ *    span the `Board` box, so edge columns do not drift;
+ * 2. detections that fall inside one of our own floating windows are dropped,
+ *    because the chessboard overlay is itself drawn on screen and would
+ *    otherwise be captured along with the real board.
+ *
+ * @param boxes      detections in the analysed image's coordinate space
+ * @param maskRects  rectangles (same space) covered by our own overlays
+ */
+export function buildGrid(
+  boxes: DetectionBox[],
+  options: { minScore?: number; maskRects?: BoardRegion[]; calibrate?: boolean } = {}
+): GridBuildResult {
+  const minScore = options.minScore ?? 0
+  const maskRects = options.maskRects ?? []
+  const calibrate = options.calibrate !== false
+
+  const grid = emptyGrid()
+  const result: GridBuildResult = {
+    grid,
+    boardBox: null,
+    lattice: { originX: 0, originY: 0, stepX: 1, stepY: 1 },
+    offLattice: 0,
+    overlaps: 0,
+    masked: 0,
+    calibration: {
+      used: false,
+      stepX: 0,
+      stepY: 0,
+      residualX: 0,
+      residualY: 0,
+      scoreX: 0,
+      scoreY: 0,
+    },
+  }
+
+  const boardBox = boxes
+    .filter(b => LABELS[b.labelIndex]?.name === 'Board')
+    .sort((a, b) => b.score - a.score)[0]
+  if (!boardBox) return result
+  result.boardBox = boardBox
+
+  const [bx, by, bw, bh] = boardBox.box
+
+  const pieces: DetectionBox[] = []
   for (const box of boxes) {
     if (box.score < minScore) continue
-    const label = LABELS[box.labelIndex]?.name
-    if (!label || label === 'Board') continue
+    if (LABELS[box.labelIndex]?.name === 'Board') continue
+    const cx = box.box[0] + box.box[2] / 2
+    const cy = box.box[1] + box.box[3] / 2
+    // Keep a little slack: a piece hugging the border may sit just outside.
+    const slackX = bw * 0.12
+    const slackY = bh * 0.08
+    if (
+      cx < bx - slackX ||
+      cx > bx + bw + slackX ||
+      cy < by - slackY ||
+      cy > by + bh + slackY
+    ) {
+      continue
+    }
+    if (maskRects.some(r => pointInRect(cx, cy, r))) {
+      result.masked++
+      continue
+    }
+    pieces.push(box)
+  }
 
-    const [bx, by, bw, bh] = box.box
-    const cx = bx + bw / 2
-    const cy = by + bh / 2
+  const centers = pieces.map(box => ({
+    x: box.box[0] + box.box[2] / 2,
+    y: box.box[1] + box.box[3] / 2,
+  }))
 
-    const u = cx / cropWidth
-    const v = cy / cropHeight
-    if (u < -0.05 || u > 1.05 || v < -0.05 || v > 1.05) continue
+  let stepX = bw / 8
+  let stepY = bh / 9
+  let originX = bx
+  let originY = by
 
-    const col = Math.round(u * (BOARD_COLS - 1))
-    const row = Math.round(v * (BOARD_ROWS - 1))
-    if (row < 0 || row >= BOARD_ROWS || col < 0 || col >= BOARD_COLS) continue
+  if (calibrate && centers.length >= 3) {
+    const fitX = fitLattice(centers.map(c => c.x), stepX)
+    const fitY = fitLattice(centers.map(c => c.y), stepY)
+    if (fitX) {
+      // Anchor on the box centre (which is reliable) but with the measured
+      // spacing (which the box is not).
+      originX = anchorOrigin(fitX, bx + bw / 2, BOARD_COLS)
+      stepX = fitX.step
+      result.calibration.used = true
+      result.calibration.stepX = fitX.step
+      result.calibration.residualX = fitX.residual
+      result.calibration.scoreX = fitX.score
+    }
+    if (fitY) {
+      originY = anchorOrigin(fitY, by + bh / 2, BOARD_ROWS)
+      stepY = fitY.step
+      result.calibration.used = true
+      result.calibration.stepY = fitY.step
+      result.calibration.residualY = fitY.residual
+      result.calibration.scoreY = fitY.score
+    }
+  }
 
+  for (let i = 0; i < pieces.length; i++) {
+    const box = pieces[i]
+    const col = Math.round((centers[i].x - originX) / stepX)
+    const row = Math.round((centers[i].y - originY) / stepY)
+    if (row < 0 || row >= BOARD_ROWS || col < 0 || col >= BOARD_COLS) {
+      result.offLattice++
+      continue
+    }
     const existing = grid[row][col]
     if (existing) {
-      overlaps++
+      result.overlaps++
       if (existing.score >= box.score) continue
     }
     grid[row][col] = box
   }
 
-  return { grid, overlaps }
+  result.lattice = { originX, originY, stepX, stepY }
+  return result
+}
+
+/** Chooses the lattice multiple whose centre matches `anchor`. */
+function anchorOrigin(fit: LatticeFit, anchor: number, cells: number): number {
+  const cellsFromOrigin = (cells - 1) / 2
+  const k = Math.round((anchor - fit.phase) / fit.step - cellsFromOrigin)
+  return fit.phase + k * fit.step
+}
+
+function pointInRect(x: number, y: number, rect: BoardRegion): boolean {
+  return (
+    x >= rect.left &&
+    x <= rect.left + rect.width &&
+    y >= rect.top &&
+    y <= rect.top + rect.height
+  )
 }
 
 /* ------------------------------------------------------------------------- */
@@ -437,6 +810,21 @@ export function gridToImagePoint(
 
 export function rowColToUci(row: number, col: number): string {
   return `${String.fromCharCode(97 + col)}${9 - row}`
+}
+
+/**
+ * Maps a lattice coordinate to a pixel inside the analysed image, using the
+ * fitted lattice rather than the detected board box.
+ */
+export function latticeToPoint(
+  lattice: { originX: number; originY: number; stepX: number; stepY: number },
+  row: number,
+  col: number
+): { x: number; y: number } {
+  return {
+    x: lattice.originX + col * lattice.stepX,
+    y: lattice.originY + row * lattice.stepY,
+  }
 }
 
 export function uciToRowCol(uci: string): { row: number; col: number } | null {

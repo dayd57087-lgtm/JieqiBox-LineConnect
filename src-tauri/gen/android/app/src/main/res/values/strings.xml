@@ -16,4 +16,7 @@
     <string name="line_connect_overlay_board">棋盘</string>
     <string name="line_connect_overlay_idle">待机</string>
     <string name="line_connect_overlay_scan">扫描</string>
+    <string name="line_connect_overlay_side_auto">自动判</string>
+    <string name="line_connect_overlay_side_red">执红</string>
+    <string name="line_connect_overlay_side_black">执黑</string>
 </resources>

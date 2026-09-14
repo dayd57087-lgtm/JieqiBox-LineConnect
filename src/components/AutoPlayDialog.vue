@@ -441,6 +441,41 @@
                 </span>
                 <span>{{ t('lineConnect.overlayTicks') }}: {{ tickCount }}</span>
                 <span>{{ detectedSideText }}</span>
+                <span>
+                  {{ t('lineConnect.sideSourceLabel') }}:
+                  {{
+                    sideSource === 'manual'
+                      ? t('lineConnect.sideSourceManual')
+                      : t('lineConnect.sideSourceAuto')
+                  }}
+                </span>
+                <span>
+                  {{ t('lineConnect.flippedLabel') }}:
+                  {{
+                    targetFlipped
+                      ? t('lineConnect.flippedYes')
+                      : t('lineConnect.flippedNo')
+                  }}
+                </span>
+                <span>
+                  {{ t('lineConnect.moveCheckLabel') }}:
+                  {{
+                    moveCheck === 'ok'
+                      ? t('lineConnect.moveCheckOk')
+                      : moveCheck === 'failed'
+                        ? t('lineConnect.moveCheckFailed')
+                        : moveCheck === 'pending'
+                          ? t('lineConnect.moveCheckPending')
+                          : t('lineConnect.moveCheckNa')
+                  }}
+                </span>
+                <span>
+                  {{ t('lineConnect.gridFitLabel') }}:
+                  {{ gridResidual.toFixed(3) }}{{ t('lineConnect.gridFitUnit') }}
+                </span>
+                <span>
+                  {{ t('lineConnect.maskedLabel') }}: {{ maskedDetections }}
+                </span>
                 <span>{{ t('lineConnect.evalNow') }}: {{ evaluation }}</span>
                 <span>
                   {{ t('lineConnect.perfMode') }}:
@@ -473,6 +508,17 @@
               <v-textarea
                 :model-value="lastFen"
                 :label="t('lineConnect.lastFen')"
+                rows="2"
+                density="compact"
+                variant="outlined"
+                readonly
+                hide-details
+                class="mt-2"
+              />
+
+              <v-textarea
+                :model-value="engineFen"
+                :label="t('lineConnect.engineFen')"
                 rows="2"
                 density="compact"
                 variant="outlined"
@@ -579,6 +625,12 @@
     hasAccessibility,
     autoPlay,
     mySide,
+    sideSource,
+    targetFlipped,
+    engineFen,
+    moveCheck,
+    gridResidual,
+    maskedDetections,
     evaluation,
     setAutoPlay,
     overlayVisible,

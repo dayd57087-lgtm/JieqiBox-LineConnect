@@ -799,7 +799,8 @@ class ScreenCaptureService : Service() {
         connectRunning: Boolean?,
         autoPlay: Boolean?,
         autoEnabled: Boolean?,
-        boardVisible: Boolean?
+        boardVisible: Boolean?,
+        side: String?
     ) {
         overlay?.update(
             turn = turn,
@@ -809,7 +810,8 @@ class ScreenCaptureService : Service() {
             connectRunning = connectRunning,
             autoPlay = autoPlay,
             autoEnabled = autoEnabled,
-            boardVisible = boardVisible
+            boardVisible = boardVisible,
+            side = side
         )
     }
 

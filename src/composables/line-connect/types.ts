@@ -67,7 +67,7 @@ export interface LineConnectSettings {
 
 export const DEFAULT_SETTINGS: LineConnectSettings = {
   mySide: 'auto',
-  detectWindowMs: 5000,
+  detectWindowMs: 3500,
   pollIntervalMs: 400,
   captureScale: 0.75,
   jpegQuality: 70,

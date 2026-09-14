@@ -40,9 +40,16 @@ class LineConnectOverlay(
         const val ACTION_NEW_GAME = "newGame"
         const val ACTION_CONNECT = "connect"
         const val ACTION_AUTO = "auto"
+        const val ACTION_SIDE = "side"
         const val ACTION_VARIATION = "variation"
         const val ACTION_BOARD = "board"
         const val ACTION_CLOSE = "close"
+
+        /** Key used to publish this window's screen rectangle. */
+        private const val BOUNDS_KEY = "controlbar"
+
+        /** How often the screen rectangle is re-published while visible. */
+        private const val BOUNDS_INTERVAL_MS = 700L
 
         private const val COLOR_BAR_BG = 0xE8171717.toInt()
         private const val COLOR_BTN = 0xFF3A3A3A.toInt()
@@ -56,6 +63,15 @@ class LineConnectOverlay(
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val boundsHandler = Handler(Looper.getMainLooper())
+    private val boundsRunnable = object : Runnable {
+        override fun run() {
+            OverlayRegistry.update(BOUNDS_KEY, root)
+            if (root != null) boundsHandler.postDelayed(this, BOUNDS_INTERVAL_MS)
+        }
+    }
+
     private var root: View? = null
     private var bar: LinearLayout? = null
     private var params: WindowManager.LayoutParams? = null
@@ -69,6 +85,7 @@ class LineConnectOverlay(
     private var connectButton: TextView? = null
     private var autoButton: TextView? = null
     private var boardButton: TextView? = null
+    private var sideButton: TextView? = null
     private val actionButtons = mutableMapOf<String, TextView>()
 
     private var collapsed = false
@@ -107,6 +124,9 @@ class LineConnectOverlay(
                 wm.addView(view, lp)
                 root = view
                 params = lp
+                OverlayRegistry.update(BOUNDS_KEY, view)
+                boundsHandler.removeCallbacks(boundsRunnable)
+                boundsHandler.postDelayed(boundsRunnable, BOUNDS_INTERVAL_MS)
                 added = true
                 Log.i(TAG, "Overlay shown")
             } catch (e: Exception) {
@@ -127,6 +147,8 @@ class LineConnectOverlay(
             root = null
             params = null
             bar = null
+            boundsHandler.removeCallbacks(boundsRunnable)
+            OverlayRegistry.remove(BOUNDS_KEY)
             turnView = null
             statusView = null
             evalView = null
@@ -134,6 +156,7 @@ class LineConnectOverlay(
             connectButton = null
             autoButton = null
             boardButton = null
+            sideButton = null
             actionButtons.clear()
             Log.i(TAG, "Overlay hidden")
         }
@@ -165,13 +188,33 @@ class LineConnectOverlay(
         connectRunning: Boolean? = null,
         autoPlay: Boolean? = null,
         autoEnabled: Boolean? = null,
-        boardVisible: Boolean? = null
+        boardVisible: Boolean? = null,
+        side: String? = null
     ) {
         runOnMain {
             turn?.let { turnView?.text = it }
             status?.let { statusView?.text = it }
             evaluation?.let { evalView?.text = it }
             waiting?.let { waitView?.text = it }
+
+            side?.let { value ->
+                sideButton?.let { btn ->
+                    btn.text = context.getString(
+                        when (value) {
+                            "w" -> R.string.line_connect_overlay_side_red
+                            "b" -> R.string.line_connect_overlay_side_black
+                            else -> R.string.line_connect_overlay_side_auto
+                        }
+                    )
+                    btn.background = buttonBackground(
+                        when (value) {
+                            "w" -> COLOR_BTN_RED
+                            "b" -> COLOR_BTN_BLUE
+                            else -> COLOR_BTN
+                        }
+                    )
+                }
+            }
 
             connectRunning?.let { running ->
                 connectButton?.let { btn ->
@@ -301,6 +344,18 @@ class LineConnectOverlay(
                 layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
             }
         )
+
+        // Side switch. The colour we play is the one thing the automatic
+        // detection can get wrong on a static board (it cannot tell "the
+        // opponent is thinking" from "it is my turn" until something moves), so
+        // it must be correctable without leaving the game.
+        sideButton = makeButton(
+            context.getString(R.string.line_connect_overlay_side_auto),
+            ACTION_SIDE,
+            COLOR_BTN
+        )
+        sideButton?.let { statusRow.addView(it) }
+        statusRow.addView(makeDivider())
         statusRow.addView(evalView)
         statusRow.addView(makeDivider())
         statusRow.addView(waitView)

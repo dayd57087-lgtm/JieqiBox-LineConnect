@@ -20,14 +20,22 @@ import { ref, watch } from 'vue'
 import { LABELS, type DetectionBox } from '../image-recognition/types'
 import {
   JieqiPoolTracker,
+  buildGrid,
   buildJieqiFen,
   countRevealedChars,
+  detectOrientation,
   fenPositionKey,
   gridToImagePoint,
+  inferMoverSide,
   isStartPosition,
+  latticeToPoint,
+  mirrorGrid,
+  moveLanded,
   quadFromBox,
+  sideAtCell,
   uciToSquares,
   type BoardQuad,
+  type BoardRegion,
   type Grid,
 } from './boardFen'
 import {
@@ -57,6 +65,8 @@ interface PassResult {
   warnings: string[]
   pieceCount: number
   quad: BoardQuad | null
+  /** Calibrated lattice in captured-frame pixels (not screen pixels). */
+  lattice: { originX: number; originY: number; stepX: number; stepY: number } | null
   boxes: DetectionBox[]
   imageWidth: number
   imageHeight: number
@@ -87,6 +97,18 @@ export function useLineConnect(deps: LineConnectDeps) {
   const mySide = ref<Side | null>(null)
   /** Which side we believe is to move in the last observed position. */
   const sideToMove = ref<Side>('w')
+  /** Where `mySide` came from, for the diagnostics panel. */
+  const sideSource = ref<'auto' | 'manual'>('auto')
+  /** True when the captured board is drawn upside down (we play black). */
+  const targetFlipped = ref(false)
+  /** FEN actually handed to the engine on the last analysis. */
+  const engineFen = ref('')
+  /** Result of the post-move check: 'ok' | 'failed' | 'pending' | 'n/a'. */
+  const moveCheck = ref('n/a')
+  /** Mean lattice residual (cells) of the last pass; near 0 means a clean fit. */
+  const gridResidual = ref(0)
+  /** Detections dropped because one of our own floating windows covered them. */
+  const maskedDetections = ref(0)
 
   const overlayVisible = ref(false)
   const chessboardVisible = ref(false)
@@ -117,6 +139,8 @@ export function useLineConnect(deps: LineConnectDeps) {
   /** See the note in startLoopDriver(). */
   let boardRect: { left: number; top: number; width: number; height: number } | null = null
   let boardQuad: BoardQuad | null = null
+  /** Calibrated lattice of the newest pass, in captured-frame pixels. */
+  let lastLattice: { originX: number; originY: number; stepX: number; stepY: number } | null = null
   let framesSinceLocate = 0
 
   /** Newest stable observation. */
@@ -131,6 +155,37 @@ export function useLineConnect(deps: LineConnectDeps) {
   /** True between playing a move and observing the resulting position. */
   let ourMoveInFlight = false
 
+  /**
+   * Whether we have seen a position at all yet.
+   *
+   * The very first observation is not a move: nothing has been played since we
+   * started watching. Without this flag the very first frame was treated as "the
+   * opponent just moved", which pinned our colour to the opposite of whoever was
+   * to move at that moment - i.e. always red-to-move => "I am black", whatever
+   * the truth was.
+   */
+  let hasBaseline = false
+
+  /** Last distinct observed position, used to identify who moved. */
+  let prevGrid: Grid | null = null
+
+  /** Move we sent to the platform, waiting to be confirmed. */
+  let pendingMove: {
+    uci: string
+    from: { row: number; col: number }
+    to: { row: number; col: number }
+    retried: boolean
+  } | null = null
+
+  /**
+   * Orientation of the captured board as raw screen rows.
+   *
+   * When the game app flips the board (typical when the user plays black) the
+   * recognised position is upside down, and every engine move would be mirrored.
+   * Derived from the generals, which never change sides.
+   */
+  let rawFlipped = false
+
   /** When we first saw a stable position, used for the side-detection window. */
   let firstStableAt = 0
 
@@ -143,6 +198,10 @@ export function useLineConnect(deps: LineConnectDeps) {
 
   /** How long to wait before retrying a move that did not register. */
   const RETRY_BACKOFF_MS = 2500
+
+  /** Don't repeat the "your overlay is covering the board" warning too often. */
+  const MASK_WARNING_INTERVAL_MS = 8000
+  let lastMaskWarningAt = 0
 
   /**
    * Fewer pieces than this and the recognition is not trustworthy enough to
@@ -225,6 +284,36 @@ export function useLineConnect(deps: LineConnectDeps) {
       return raw ? JSON.parse(raw) : null
     } catch {
       return null
+    }
+  }
+
+  /**
+   * Rectangles of our own floating windows, in screen pixels.
+   *
+   * The chessboard overlay is a real window on top of the game, so the record
+   * capture sees it too. Its pieces used to be recognised as if they were on the
+   * board, which corrupts the position; these rectangles are used to drop those
+   * detections.
+   */
+  function overlayRects(): BoardRegion[] {
+    try {
+      const raw = bridge()?.overlayRects?.()
+      if (!raw) return []
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return []
+      return parsed
+        .filter(
+          (r: any) =>
+            r && Number.isFinite(r.left) && Number.isFinite(r.top) && r.width > 0 && r.height > 0
+        )
+        .map((r: any) => ({
+          left: Number(r.left),
+          top: Number(r.top),
+          width: Number(r.width),
+          height: Number(r.height),
+        }))
+    } catch {
+      return []
     }
   }
 
@@ -445,6 +534,7 @@ export function useLineConnect(deps: LineConnectDeps) {
           autoPlay: autoPlay.value,
           autoEnabled: hasAccessibility() && !!deps.engine?.isEngineLoaded?.value,
           boardVisible: chessboardVisible.value,
+          side: settings.value.mySide,
         })
       )
     } catch {
@@ -574,6 +664,7 @@ export function useLineConnect(deps: LineConnectDeps) {
     poolTracker.reset()
     boardRect = null
     boardQuad = null
+    lastLattice = null
     framesSinceLocate = 0
     lastGrid = null
     lastFenValue = ''
@@ -584,16 +675,26 @@ export function useLineConnect(deps: LineConnectDeps) {
     firstStableAt = 0
     avoidMove = null
     lastMoveTime = 0
+    hasBaseline = false
+    prevGrid = null
+    pendingMove = null
+    rawFlipped = false
     moveCount.value = 0
     passes.value = 0
     errorCount.value = 0
     detectionCount.value = 0
     lastMove.value = ''
     lastFen.value = ''
+    engineFen.value = ''
+    moveCheck.value = 'n/a'
+    gridResidual.value = 0
+    maskedDetections.value = 0
+    targetFlipped.value = false
     lastWarnings.value = []
     evaluation.value = '--'
     sideToMove.value = 'w'
     mySide.value = settings.value.mySide === 'auto' ? null : (settings.value.mySide as Side)
+    sideSource.value = settings.value.mySide === 'auto' ? 'auto' : 'manual'
     if (!silent) {
       log(
         'info',
@@ -603,6 +704,16 @@ export function useLineConnect(deps: LineConnectDeps) {
       )
     }
     syncOverlay()
+  }
+
+  /**
+   * Switches our colour, either from the panel or from the floating bar.
+   *
+   * `auto` hands the decision back to the flow analysis. The actual bookkeeping
+   * happens in the watcher below, so both entry points behave identically.
+   */
+  function setMySide(side: 'auto' | Side): void {
+    settings.value.mySide = side
   }
 
   /* ------------------------------------------------------------------ */
@@ -697,18 +808,47 @@ export function useLineConnect(deps: LineConnectDeps) {
     return settings.value.captureScale
   }
 
-  async function performMove(uci: string, quad: BoardQuad, scale: number): Promise<boolean> {
+  /** Engine lattice coordinates -> raw screen lattice coordinates. */
+  function displayRC(rc: { row: number; col: number }): { row: number; col: number } {
+    if (!rawFlipped) return rc
+    return { row: 9 - rc.row, col: 8 - rc.col }
+  }
+
+  async function performMove(
+    uci: string,
+    target: {
+      lattice: { originX: number; originY: number; stepX: number; stepY: number } | null
+      quad: BoardQuad | null
+    },
+    scale: number
+  ): Promise<boolean> {
     const squares = uciToSquares(uci)
     if (!squares) {
       log('error', `无法解析引擎着法：${uci}`)
       return false
     }
-    const from = gridToImagePoint(quad, squares.from.row, squares.from.col)
-    const to = gridToImagePoint(quad, squares.to.row, squares.to.col)
-    const fx = from.x / scale
-    const fy = from.y / scale
-    const tx = to.x / scale
-    const ty = to.y / scale
+    // The engine always speaks the canonical layout (black at the top). Mirror
+    // the squares back onto the captured board when it is drawn upside down.
+    const fromRC = displayRC(squares.from)
+    const toRC = displayRC(squares.to)
+
+    let fromP: { x: number; y: number }
+    let toP: { x: number; y: number }
+    if (target.lattice) {
+      fromP = latticeToPoint(target.lattice, fromRC.row, fromRC.col)
+      toP = latticeToPoint(target.lattice, toRC.row, toRC.col)
+    } else if (target.quad) {
+      fromP = gridToImagePoint(target.quad, fromRC.row, fromRC.col)
+      toP = gridToImagePoint(target.quad, toRC.row, toRC.col)
+    } else {
+      log('warn', '还没有可用的棋盘标定，无法落子')
+      return false
+    }
+
+    const fx = fromP.x / scale
+    const fy = fromP.y / scale
+    const tx = toP.x / scale
+    const ty = toP.y / scale
 
     log(
       'move',
@@ -775,39 +915,43 @@ export function useLineConnect(deps: LineConnectDeps) {
       const image = await loadImageElement(lastPreview.value)
       imageWidth = image.naturalWidth || 1
       toFrame = frameWidth > 0 ? frameWidth / imageWidth : 1
-      return await recogniseImage(image, boxes => {
-        const boardBox = deps.recognition.getBoardBox(boxes)
-        boardDetected.value = !!boardBox
-        if (!boardBox) return null
+      return await recogniseImage(
+        image,
+        boxes => {
+          const boardBox = deps.recognition.getBoardBox(boxes)
+          boardDetected.value = !!boardBox
+          if (!boardBox) return null
 
-        // Convert the box from transferred-image pixels back into captured-frame
-        // pixels, which is the space the native crop expects. A margin is added
-        // so the board is fully inside the crop and the model can still detect
-        // it there.
-        const [bx, by, bw, bh] = boardBox.box
-        const margin = 0.06
-        const left = Math.max(0, (bx - bw * margin) * toFrame)
-        const top = Math.max(0, (by - bh * margin) * toFrame)
-        const right = Math.min(frameWidth || Infinity, (bx + bw * (1 + margin)) * toFrame)
-        const bottom = Math.min(frameHeight || Infinity, (by + bh * (1 + margin)) * toFrame)
-        boardRect = { left, top, width: right - left, height: bottom - top }
-        framesSinceLocate = 0
-        try {
-          // Restrict change detection to the board; the status-bar clock would
-          // otherwise keep the loop busy.
-          if (frameWidth > 0 && frameHeight > 0) {
-            api.setWatchRegion?.(
-              left / frameWidth,
-              top / frameHeight,
-              right / frameWidth,
-              bottom / frameHeight
-            )
+          // Convert the box from transferred-image pixels back into captured-frame
+          // pixels, which is the space the native crop expects. A margin is added
+          // so the board is fully inside the crop and the model can still detect
+          // it there.
+          const [bx, by, bw, bh] = boardBox.box
+          const margin = 0.06
+          const left = Math.max(0, (bx - bw * margin) * toFrame)
+          const top = Math.max(0, (by - bh * margin) * toFrame)
+          const right = Math.min(frameWidth || Infinity, (bx + bw * (1 + margin)) * toFrame)
+          const bottom = Math.min(frameHeight || Infinity, (by + bh * (1 + margin)) * toFrame)
+          boardRect = { left, top, width: right - left, height: bottom - top }
+          framesSinceLocate = 0
+          try {
+            // Restrict change detection to the board; the status-bar clock would
+            // otherwise keep the loop busy.
+            if (frameWidth > 0 && frameHeight > 0) {
+              api.setWatchRegion?.(
+                left / frameWidth,
+                top / frameHeight,
+                right / frameWidth,
+                bottom / frameHeight
+              )
+            }
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
-        }
-        return boardRect
-      })
+          return boardRect
+        },
+        { scale: toFrame, offsetX: 0, offsetY: 0 }
+      )
     }
 
     const rect = boardRect!
@@ -823,31 +967,40 @@ export function useLineConnect(deps: LineConnectDeps) {
     const image = await loadImageElement(lastPreview.value)
     imageWidth = image.naturalWidth || 1
 
-    return await recogniseImage(image, boxes => {
-      // The crop lives inside the frame, so its own Board detection gives the
-      // accurate quad; no coordinate juggling is required for the pieces.
-      const boardBox = deps.recognition.getBoardBox(boxes)
-      boardDetected.value = !!boardBox
-      if (!boardBox) return null
-      const scaleX = frameWidth > 0 ? (imageWidth ? rect.width / imageWidth : 1) : 1
-      const [bx, by, bw, bh] = boardBox.box
-      return {
-        left: rect.left + bx * scaleX,
-        top: rect.top + by * scaleX,
-        width: bw * scaleX,
-        height: bh * scaleX,
-      } as any
-    })
+    const cropScale = imageWidth ? rect.width / imageWidth : 1
+    return await recogniseImage(
+      image,
+      boxes => {
+        // The crop lives inside the frame, so its own Board detection gives the
+        // accurate rectangle; no coordinate juggling is required for the pieces.
+        const boardBox = deps.recognition.getBoardBox(boxes)
+        boardDetected.value = !!boardBox
+        if (!boardBox) return null
+        const scaleX = cropScale || 1
+        const [bx, by, bw, bh] = boardBox.box
+        return {
+          left: rect.left + bx * scaleX,
+          top: rect.top + by * scaleX,
+          width: bw * scaleX,
+          height: bh * scaleX,
+        } as any
+      },
+      { scale: cropScale, offsetX: rect.left, offsetY: rect.top }
+    )
   }
 
   /**
    * Shared part of both capture paths: run the detector, build the grid and the
    * FEN. `locate` maps the detection result onto a board rectangle (in frame
    * coordinates) for the caller to persist.
+   *
+   * @param toFrame scale + offset that turns analysed-image pixels into captured
+   *                frame pixels (the frame is what the native crop expects)
    */
   async function recogniseImage(
     image: HTMLImageElement,
-    locate: (boxes: DetectionBox[]) => any
+    locate: (boxes: DetectionBox[]) => any,
+    toFrame: { scale: number; offsetX: number; offsetY: number }
   ): Promise<PassResult | null> {
     const startedAt = Date.now()
     const boxes: DetectionBox[] = await deps.recognition.processImageElement(image)
@@ -857,10 +1010,48 @@ export function useLineConnect(deps: LineConnectDeps) {
     const located = locate(boxes)
     if (!located) return null
 
-    // Both paths use the same mapping helper: it finds the Board inside the
-    // analysed image and maps pieces onto the lattice with the bilinear quad.
-    // Using one code path avoids the two modes drifting apart.
-    const grid: Grid = deps.recognition.updateBoardGrid(boxes)
+    // Our own floating windows are drawn over the game and therefore captured.
+    // Translate their screen rectangles into the analysed image's pixels.
+    const frameStatus = captureStatus()
+    const frameToImage = 1 / (toFrame.scale || 1)
+    const maskRects: BoardRegion[] = overlayRects()
+      .map(rect => ({
+        left: (rect.left * screenScale(frameStatus) - toFrame.offsetX) * frameToImage,
+        top: (rect.top * screenScale(frameStatus) - toFrame.offsetY) * frameToImage,
+        width: rect.width * screenScale(frameStatus) * frameToImage,
+        height: rect.height * screenScale(frameStatus) * frameToImage,
+      }))
+      .filter(rect => rect.width > 4 && rect.height > 4)
+
+    const built = buildGrid(boxes, { minScore: settings.value.minScore, maskRects })
+    maskedDetections.value = built.masked
+    if (built.masked >= 4 && Date.now() - lastMaskWarningAt > MASK_WARNING_INTERVAL_MS) {
+      lastMaskWarningAt = Date.now()
+      log(
+        'warn',
+        `有 ${built.masked} 个棋子被本应用的悬浮窗挡住（截图会连悬浮窗一起拍到），请把棋盘窗口挪开或关掉`
+      )
+    }
+    if (!built.boardBox) return null
+
+    gridResidual.value = Math.max(
+      built.calibration.residualX,
+      built.calibration.residualY
+    )
+
+    // Work out which way round the board is drawn before anything else: feeding
+    // a mirrored position to the engine produces mirrored moves.
+    const orientation = detectOrientation(built.grid)
+    if (orientation) {
+      const flipped = orientation === 'flipped'
+      if (flipped !== rawFlipped) {
+        rawFlipped = flipped
+        targetFlipped.value = flipped
+        log('info', flipped ? '检测到棋盘为翻转显示（我方执黑视角）' : '检测到棋盘为正常显示')
+      }
+    }
+
+    const grid: Grid = rawFlipped ? mirrorGrid(built.grid) : built.grid
 
     // Hidden piece pools only shrink when pieces are revealed, so feeding every
     // observation keeps the estimate tight.
@@ -889,6 +1080,12 @@ export function useLineConnect(deps: LineConnectDeps) {
         score: 1,
         labelIndex: 4,
       }),
+      lattice: {
+        originX: toFrame.offsetX + built.lattice.originX * toFrame.scale,
+        originY: toFrame.offsetY + built.lattice.originY * toFrame.scale,
+        stepX: built.lattice.stepX * toFrame.scale,
+        stepY: built.lattice.stepY * toFrame.scale,
+      },
       boxes,
       imageWidth: image.naturalWidth || 1,
       imageHeight: image.naturalHeight || 1,
@@ -900,39 +1097,128 @@ export function useLineConnect(deps: LineConnectDeps) {
   /* ------------------------------------------------------------------ */
 
   /**
+   * Re-derives the FEN of a position for a given side to move.
+   *
+   * The FEN carried through a pass is always built with the side-to-move known
+   * at capture time, which is the side that was to move in the *previous*
+   * position. Rebuilding it after the bookkeeping has caught up is what makes
+   * the engine answer for the player who is really on move.
+   */
+  function rebuildFen(grid: Grid, side: Side): string {
+    return buildJieqiFen(grid, poolTracker.poolFen(), side, settings.value.minScore).fen
+  }
+
+  /** "12 子" style summary used in the logs. */
+  function pieceCountText(grid: Grid): string {
+    let count = 0
+    for (let row = 0; row < grid.length; row++) {
+      for (let col = 0; col < grid[row].length; col++) {
+        if (grid[row][col]) count++
+      }
+    }
+    return `${count} 子`
+  }
+
+  /**
    * Handles a position that has been observed `stableFrames` times in a row.
    *
    * Called on every tick while the board is static, so it has to be careful to
    * only act once per position (and to back off when a move failed to register).
    */
-  async function onStablePosition(grid: Grid, fen: string, key: string) {
-    // --- keep the side-to-move bookkeeping in sync ---------------------
+  async function onStablePosition(grid: Grid, key: string) {
+    const autoSide = settings.value.mySide === 'auto'
+
+    /* --- keep the side-to-move bookkeeping in sync --------------------- */
     const isNewPosition = key !== observedKey
     if (isNewPosition) {
-      const mover = sideToMove.value
+      const assumedMover = sideToMove.value
 
-      if (!ourMoveInFlight) {
-        // The board changed and we did not play: the opponent just moved.
-        const inferred = other(mover)
-        if (mySide.value !== inferred) {
-          mySide.value = inferred
-          log('info', `自动判断：我方执${sideLabel(inferred)}`)
+      if (!hasBaseline) {
+        // The very first observation is not a move - it is simply the position
+        // we started watching. Treating it as one used to flip our colour to the
+        // side that was NOT to move at that instant, which is why a red player
+        // was always told "I am black".
+        hasBaseline = true
+        observedKey = key
+        prevGrid = grid
+        if (isStartPosition(grid)) {
+          sideToMove.value = 'w'
+          log('info', '识别到开局局面，红方先行')
+        }
+        log(
+          'info',
+          `建立基准局面：${sideLabel(sideToMove.value)}走（${pieceCountText(grid)}）${
+            autoSide ? '，等待对手走子来判断我方颜色' : ''
+          }`
+        )
+        firstStableAt = Date.now()
+      } else {
+        // A move happened. Identify it from the board itself when possible: the
+        // colour of the piece that left its square is definitive, whereas
+        // "the side to move alternates" is only an assumption.
+        const detected = prevGrid ? inferMoverSide(prevGrid, grid) : null
+        let mover: Side = assumedMover
+        if (detected) {
+          mover = detected.mover
+          if (detected.mover !== assumedMover) {
+            log(
+              'warn',
+              `走子方按棋盘变化修正：${sideLabel(detected.mover)}（原先按顺序推断为${sideLabel(assumedMover)}）`
+            )
+          }
+        }
+
+        if (!ourMoveInFlight && autoSide) {
+          // The board changed and we did not play: the opponent just moved.
+          const inferred = other(mover)
+          if (mySide.value !== inferred) {
+            mySide.value = inferred
+            sideSource.value = 'auto'
+            log('info', `自动判断：我方执${sideLabel(inferred)}`)
+          }
+        }
+        ourMoveInFlight = false
+        sideToMove.value = other(mover)
+        observedKey = key
+        lastAttemptKey = ''
+        lastAnalysedKey = ''
+
+        if (isStartPosition(grid)) {
+          // The opening layout is authoritative: red moves first.
+          sideToMove.value = 'w'
+          log('info', '识别到开局局面，红方先行')
+        }
+
+        /* --- did the move we sent actually land? ----------------------- */
+        if (pendingMove) {
+          const landed = moveLanded(grid, pendingMove)
+          moveCheck.value = landed ? 'ok' : 'failed'
+          if (landed) {
+            log('info', `落子已确认：${pendingMove.uci}`)
+            pendingMove = null
+          } else if (!pendingMove.retried) {
+            log('warn', `落子未生效（${pendingMove.uci}），重试一次`)
+            const retry = { ...pendingMove, retried: true }
+            pendingMove = null
+            prevGrid = grid
+            lastAttemptKey = ''
+            observedKey = key
+            await replayMove(retry.uci)
+            phase.value = 'waiting'
+            return
+          } else {
+            log('error', `落子连续未生效（${pendingMove.uci}）：请检查无障碍手势是否被系统拦截`)
+            pendingMove = null
+            boardRect = null
+            boardQuad = null
+            lastLattice = null
+          }
         }
       }
-      ourMoveInFlight = false
-      sideToMove.value = other(mover)
-      observedKey = key
-      lastAttemptKey = ''
-      lastAnalysedKey = ''
-
-      if (isStartPosition(grid)) {
-        // The opening layout is authoritative: red moves first.
-        sideToMove.value = 'w'
-        log('info', '识别到开局局面，红方先行')
-      }
+      prevGrid = grid
     }
 
-    // --- make sure we know which colour we play ------------------------
+    /* --- make sure we know which colour we play ------------------------ */
     if (!mySide.value) {
       if (!firstStableAt) firstStableAt = Date.now()
       const waited = Date.now() - firstStableAt
@@ -944,14 +1230,27 @@ export function useLineConnect(deps: LineConnectDeps) {
       }
       const assumed = sideToMove.value
       mySide.value = assumed
+      sideSource.value = 'auto'
       log(
         'info',
-        `自动判断：我方执${sideLabel(assumed)}（等待 ${(waited / 1000).toFixed(1)} 秒内对手未走子）`
+        `自动判断：我方执${sideLabel(assumed)}（${(waited / 1000).toFixed(1)} 秒内对手未走子；如判断有误，点悬浮窗的走棋方按钮切换）`
       )
       firstStableAt = 0
     }
 
-    // --- is it our move? ----------------------------------------------
+    /* --- rebuild the FEN for the side that is really to move ----------- */
+    // The FEN handed to this function was built while the *previous* position
+    // was on the board, so its side-to-move field is one move behind. Handing
+    // that to the engine makes it answer for the opponent, and the loop then
+    // plays the opponent's move on the opponent's pieces.
+    const liveFen = rebuildFen(grid, sideToMove.value)
+    if (liveFen !== lastFenValue) {
+      lastFenValue = liveFen
+      lastFen.value = liveFen
+      pushBoardState()
+    }
+
+    /* --- is it our move? ---------------------------------------------- */
     if (sideToMove.value !== mySide.value) {
       phase.value = 'waiting'
       return
@@ -963,7 +1262,7 @@ export function useLineConnect(deps: LineConnectDeps) {
       return
     }
 
-    // --- analysis-only mode -------------------------------------------
+    /* --- analysis-only mode ------------------------------------------- */
     if (!autoPlay.value) {
       if (lastAnalysedKey === key) {
         updateEvaluation()
@@ -973,13 +1272,14 @@ export function useLineConnect(deps: LineConnectDeps) {
       }
       lastAnalysedKey = key
       phase.value = 'thinking'
+      engineFen.value = liveFen
       try {
         deps.engine.stopAnalysis?.()
         await new Promise(resolve => setTimeout(resolve, 60))
         deps.engine.startAnalysis(
           { movetime: Math.max(1500, settings.value.thinkTimeMs) },
           [],
-          fen
+          liveFen
         )
       } catch (e) {
         log('warn', `分析失败：${String(e)}`)
@@ -990,7 +1290,7 @@ export function useLineConnect(deps: LineConnectDeps) {
       return
     }
 
-    if (!boardQuad) {
+    if (!boardQuad && !lastLattice) {
       boardRect = null
       phase.value = 'waiting'
       return
@@ -1013,9 +1313,10 @@ export function useLineConnect(deps: LineConnectDeps) {
     lastAttemptKey = key
     lastAttemptAt = Date.now()
 
-    // --- think ---------------------------------------------------------
+    /* --- think --------------------------------------------------------- */
     phase.value = 'thinking'
-    const best = await analysePosition(fen)
+    engineFen.value = liveFen
+    const best = await analysePosition(liveFen)
     updateEvaluation()
     if (!best) {
       phase.value = 'waiting'
@@ -1024,28 +1325,52 @@ export function useLineConnect(deps: LineConnectDeps) {
 
     const squares = uciToSquares(best)
     if (squares) {
-      const label = LABELS[grid[squares.from.row]?.[squares.from.col]?.labelIndex ?? -1]?.name
-      const ours =
-        sideToMove.value === 'w'
-          ? label?.startsWith('r_') || label?.startsWith('dark_r')
-          : label?.startsWith('b_') || label?.startsWith('dark_b')
-      if (label && !ours) {
+      const side = sideAtCell(grid, squares.from.row, squares.from.col)
+      if (side && side !== sideToMove.value) {
         // Not fatal: the detector may simply have missed the piece on that square.
-        log('warn', `注意：着法起点识别为 ${label}，与走子方不一致`)
+        log('warn', `注意：着法起点识别为${sideLabel(side)}棋子，与走子方不一致`)
       }
     }
 
     // --- play ----------------------------------------------------------
     phase.value = 'moving'
-    const played = await performMove(best, boardQuad, screenScale(captureStatus()))
+    const played = await performMove(
+      best,
+      { lattice: lastLattice, quad: boardQuad },
+      screenScale(captureStatus())
+    )
     lastMove.value = best
     if (played) {
       moveCount.value++
       lastMoveTime = Date.now()
       ourMoveInFlight = true
+      moveCheck.value = 'pending'
+      if (squares) {
+        // Remember what should change so the next observation can confirm that
+        // the gesture actually reached the platform.
+        pendingMove = { uci: best, from: squares.from, to: squares.to, retried: false }
+      }
       log('info', `已落子 ${best}，等待对手…`)
     }
     pushBoardState()
+    phase.value = 'waiting'
+  }
+
+  /** Re-sends a move that did not seem to register. */
+  async function replayMove(uci: string): Promise<void> {
+    phase.value = 'moving'
+    ourMoveInFlight = true
+    const played = await performMove(
+      uci,
+      { lattice: lastLattice, quad: boardQuad },
+      screenScale(captureStatus())
+    )
+    if (played) {
+      const squares = uciToSquares(uci)
+      if (squares) {
+        pendingMove = { uci, from: squares.from, to: squares.to, retried: true }
+      }
+    }
     phase.value = 'waiting'
   }
 
@@ -1184,7 +1509,7 @@ export function useLineConnect(deps: LineConnectDeps) {
       phase.value = 'waiting'
       return
     }
-    void onStablePosition(lastGrid, lastFenValue, stableKey)
+    void onStablePosition(lastGrid, stableKey)
   }
 
   function onObservation(result: PassResult) {
@@ -1197,12 +1522,14 @@ export function useLineConnect(deps: LineConnectDeps) {
     if (lastPassMode.value === 'crop' && result.pieceCount < MIN_PIECES_TO_ACT) {
       boardRect = null
       boardQuad = null
+      lastLattice = null
       lastGrid = null
       phase.value = 'waiting'
       return
     }
 
     if (result.quad) boardQuad = result.quad
+    if (result.lattice) lastLattice = result.lattice
     lastGrid = result.grid
     lastFenValue = result.fen
     lastFen.value = result.fen
@@ -1221,7 +1548,7 @@ export function useLineConnect(deps: LineConnectDeps) {
       return
     }
 
-    void onStablePosition(result.grid, result.fen, key)
+    void onStablePosition(result.grid, key)
   }
 
   /* ------------------------------------------------------------------ */
@@ -1240,6 +1567,16 @@ export function useLineConnect(deps: LineConnectDeps) {
         break
       case 'auto':
         setAutoPlay(!autoPlay.value)
+        break
+      case 'side':
+        // 自动 -> 红 -> 黑 -> 自动
+        setMySide(
+          settings.value.mySide === 'auto'
+            ? 'w'
+            : settings.value.mySide === 'w'
+              ? 'b'
+              : 'auto'
+        )
         break
       case 'variation':
         if (!lastMove.value) {
@@ -1275,6 +1612,37 @@ export function useLineConnect(deps: LineConnectDeps) {
       if (isRunning.value) {
         deps.recognition.setModelInputSize?.(settings.value.modelInputSize)
       }
+    }
+  )
+
+  /**
+   * Keeps our colour in step with the side selector (panel and floating bar).
+   *
+   * Previously the selector was overwritten by the flow-based inference on the
+   * very next frame, so a manual choice never stuck - which is why picking red by
+   * hand did not help either.
+   */
+  watch(
+    () => settings.value.mySide,
+    value => {
+      if (value === 'auto') {
+        mySide.value = null
+        sideSource.value = 'auto'
+        firstStableAt = 0
+        log('info', '走棋方改回自动判断')
+      } else if (mySide.value !== value || sideSource.value !== 'manual') {
+        mySide.value = value as Side
+        sideSource.value = 'manual'
+        log('info', `手动指定：我方执${sideLabel(value as Side)}`)
+      } else {
+        return
+      }
+      // Re-decide for the position that is already on the board. The next tick
+      // picks this up: clearing the attempt keys is enough, and it cannot race
+      // with a recognition pass that is still in flight.
+      lastAttemptKey = ''
+      lastAnalysedKey = ''
+      syncOverlay()
     }
   )
 
@@ -1430,6 +1798,13 @@ export function useLineConnect(deps: LineConnectDeps) {
     lastWarnings,
     mySide,
     sideToMove,
+    sideSource,
+    targetFlipped,
+    engineFen,
+    moveCheck,
+    gridResidual,
+    maskedDetections,
+    setMySide,
     overlayVisible,
     chessboardVisible,
     tickCount,
