@@ -122,6 +122,7 @@ export function useLineConnect(deps: LineConnectDeps) {
   /** Newest stable observation. */
   let lastGrid: Grid | null = null
   let lastFenValue = ''
+  let lastPieceCount = 0
   /** Key of the last position we treated as a new position. */
   let observedKey = ''
   let stableKey = ''
@@ -142,6 +143,13 @@ export function useLineConnect(deps: LineConnectDeps) {
 
   /** How long to wait before retrying a move that did not register. */
   const RETRY_BACKOFF_MS = 2500
+
+  /**
+   * Fewer pieces than this and the recognition is not trustworthy enough to
+   * base a move on (a real position always has the two generals plus several
+   * other pieces).
+   */
+  const MIN_PIECES_TO_ACT = 6
 
   /** Move the next analysis should avoid (the "变招" / change-move action). */
   let avoidMove: string | null = null
@@ -988,6 +996,14 @@ export function useLineConnect(deps: LineConnectDeps) {
       return
     }
 
+    if (lastPieceCount < MIN_PIECES_TO_ACT) {
+      if (isNewPosition) {
+        log('warn', `识别到的棋子过少（${lastPieceCount}），本轮不落子`)
+      }
+      phase.value = 'waiting'
+      return
+    }
+
     // A move that never reached the platform leaves the position unchanged; back
     // off for a moment instead of hammering the engine.
     if (lastAttemptKey === key && Date.now() - lastAttemptAt < RETRY_BACKOFF_MS) {
@@ -1172,11 +1188,24 @@ export function useLineConnect(deps: LineConnectDeps) {
   }
 
   function onObservation(result: PassResult) {
+    lastPieceCount = result.pieceCount
+    lastWarnings.value = result.warnings
+
+    // A crop that barely finds anything means the cached rectangle is wrong
+    // (the board moved, an overlay appeared, the app switched layout). Drop it
+    // so the next pass re-locates on a full frame instead of acting on garbage.
+    if (lastPassMode.value === 'crop' && result.pieceCount < MIN_PIECES_TO_ACT) {
+      boardRect = null
+      boardQuad = null
+      lastGrid = null
+      phase.value = 'waiting'
+      return
+    }
+
     if (result.quad) boardQuad = result.quad
     lastGrid = result.grid
     lastFenValue = result.fen
     lastFen.value = result.fen
-    lastWarnings.value = result.warnings
 
     const key = fenPositionKey(result.fen)
     if (key === stableKey) stableCount++
