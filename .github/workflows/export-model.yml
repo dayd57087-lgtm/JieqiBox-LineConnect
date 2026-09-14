@@ -132,9 +132,13 @@ jobs:
         run: |
           set -euo pipefail
           TAG="line-connect-model"
+          # The asset MUST be called best.onnx: that is the name the APK build
+          # downloads from this release.
+          cp best-dynamic.onnx best.onnx
           gh release delete "$TAG" --yes --cleanup-tag || true
-          gh release create "$TAG" best-dynamic.onnx \
+          gh release create "$TAG" best.onnx \
             --title "JieqiBox 识别模型" \
-            --notes "支持可变输入尺寸（320/416/640）。APK 构建会优先使用这个模型，并以 416 运行以提升速度。重新运行 Build Line Connect APK 即可生效。" \
+            --notes "支持可变输入尺寸（320/416/640）。APK 构建优先使用该模型并以 416 运行以提升速度。重新运行 Build Line Connect APK 即可生效。" \
             --prerelease
+          gh release view "$TAG" --json assets --jq '.assets[].name'
           echo "已发布。请重新运行 Build Line Connect APK。"
