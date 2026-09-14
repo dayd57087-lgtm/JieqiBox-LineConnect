@@ -200,6 +200,31 @@ def check_imports(path: pathlib.Path, src: str) -> None:
             failures.append(f"{path.name}: uses {cls} without 'import {fq}'")
 
 
+HEX_PATTERN = re.compile(r"0[xX]([0-9A-Fa-f_]+)(\.toInt\(\))?(L)?")
+
+
+def check_int_literals(path: pathlib.Path, src: str) -> None:
+    """Hex literals above 0x7FFFFFFF are Long in Kotlin, not Int.
+
+    Writing `0xFF1A1A1A` where an Int is expected fails to compile, so every such
+    literal needs an explicit `.toInt()`.
+    """
+    code = strip_comments(src)
+    for lineno, line in enumerate(code.splitlines(), 1):
+        for m in HEX_PATTERN.finditer(line):
+            digits = m.group(1).replace("_", "")
+            if len(digits) < 8 or m.group(2) or m.group(3):
+                continue
+            try:
+                value = int(digits, 16)
+            except ValueError:
+                continue
+            if value >= 0x80000000:
+                failures.append(
+                    f"{path.name}:{lineno}: {m.group(0)} is a Long literal, add .toInt()"
+                )
+
+
 def check_resources() -> None:
     strings = (APP / "res/values/strings.xml").read_text(encoding="utf-8")
     defined = set(re.findall(r'name="([^"]+)"', strings))
@@ -289,6 +314,7 @@ def main() -> int:
         src = kt.read_text(encoding="utf-8")
         check_balanced(kt, src)
         check_imports(kt, src)
+        check_int_literals(kt, src)
         print(f"  checked {kt.name}")
     check_resources()
     check_cross_calls()

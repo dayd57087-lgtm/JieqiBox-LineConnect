@@ -490,7 +490,7 @@ class XiangqiBoardView(context: Context) : View(context) {
         }
 
         canvas.drawCircle(cx, cy, radius, pieceFillPaint)
-        pieceBorderPaint.color = if (isRed) 0xFFC62828.toInt() else 0xFF1A1A1A
+        pieceBorderPaint.color = if (isRed) 0xFFC62828.toInt() else 0xFF1A1A1A.toInt()
         canvas.drawCircle(cx, cy, radius, pieceBorderPaint)
 
         val index = LETTER_INDEX[letter.uppercaseChar()]
