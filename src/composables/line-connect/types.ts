@@ -37,11 +37,29 @@ export interface LineConnectSettings {
   assumeMyTurn: boolean
   /** Minimum confidence for a detection to be trusted. */
   minScore: number
+  /**
+   * Analyse only the board crop once it has been located.
+   *
+   * This is the main accuracy and speed win: the payload sent over the JS
+   * bridge shrinks by roughly an order of magnitude and the pieces become much
+   * larger relative to the model input.
+   */
+  useBoardCrop: boolean
+  /** Longest edge of the crop handed to the model. */
+  cropMaxEdge: number
+  /** Re-run a full-frame pass every N passes to re-locate the board. */
+  relocateEvery: number
+  /** Skip inference entirely while the screen is not changing. */
+  skipUnchangedFrames: boolean
+  /** Fraction of changed frame cells that counts as "something happened". */
+  changeThreshold: number
+  /** Save screenshots plus recognition results for labelling / fine-tuning. */
+  recordSamples: boolean
 }
 
 export const DEFAULT_SETTINGS: LineConnectSettings = {
   mySide: 'w',
-  pollIntervalMs: 900,
+  pollIntervalMs: 500,
   captureScale: 0.75,
   jpegQuality: 70,
   stableFrames: 2,
@@ -52,6 +70,12 @@ export const DEFAULT_SETTINGS: LineConnectSettings = {
   dryRun: false,
   assumeMyTurn: true,
   minScore: 0.35,
+  useBoardCrop: true,
+  cropMaxEdge: 640,
+  relocateEvery: 25,
+  skipUnchangedFrames: true,
+  changeThreshold: 0.002,
+  recordSamples: false,
 }
 
 export type LogLevel = 'info' | 'warn' | 'error' | 'move'

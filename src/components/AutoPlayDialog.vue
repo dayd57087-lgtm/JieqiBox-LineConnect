@@ -198,6 +198,65 @@
           {{ t('lineConnect.overlayTip') }}
         </v-alert>
 
+        <!-- Floating chessboard -->
+        <v-card variant="outlined" class="lc-check mt-3" :class="{ 'lc-check--ok': chessboardVisible }">
+          <div class="lc-check__head">
+            <v-icon size="18">mdi-grid</v-icon>
+            <span>{{ t('lineConnect.chessboard') }}</span>
+          </div>
+          <p class="lc-check__hint">{{ t('lineConnect.chessboardHint') }}</p>
+          <div class="lc-check__actions">
+            <v-btn
+              size="small"
+              color="primary"
+              variant="tonal"
+              :disabled="!isSupported"
+              @click="toggleChessboard"
+            >
+              {{
+                chessboardVisible
+                  ? t('lineConnect.chessboardHide')
+                  : t('lineConnect.chessboardShow')
+              }}
+            </v-btn>
+          </div>
+        </v-card>
+
+        <!-- Sample collection -->
+        <v-card
+          variant="outlined"
+          class="lc-check mt-2"
+          :class="{ 'lc-check--ok': sampleRecording }"
+        >
+          <div class="lc-check__head">
+            <v-icon size="18">mdi-database-plus-outline</v-icon>
+            <span>{{ t('lineConnect.samples') }}</span>
+          </div>
+          <p class="lc-check__hint">{{ t('lineConnect.samplesHint') }}</p>
+          <div class="lc-check__actions">
+            <v-btn
+              size="small"
+              color="primary"
+              variant="tonal"
+              :disabled="!isSupported || !captureRunning"
+              @click="onToggleSamples"
+            >
+              {{
+                sampleRecording
+                  ? t('lineConnect.samplesStop')
+                  : t('lineConnect.samplesStart')
+              }}
+            </v-btn>
+            <v-chip size="small" variant="tonal">
+              {{ t('lineConnect.samplesCount') }} {{ sampleCount }}
+              {{ t('lineConnect.samplesUnit') }}
+            </v-chip>
+          </div>
+          <p v-if="samplePathText" class="lc-check__path">
+            {{ t('lineConnect.samplesPath') }}: {{ samplePathText }}
+          </p>
+        </v-card>
+
         <!-- Configuration -->
         <v-expansion-panels variant="accordion" class="mt-3">
           <v-expansion-panel :title="t('lineConnect.settings')">
@@ -282,7 +341,55 @@
                   hide-details
                 />
               </div>
+              <div class="lc-settings">
+                <v-text-field
+                  v-model.number="settings.cropMaxEdge"
+                  type="number"
+                  min="320"
+                  max="1280"
+                  step="64"
+                  :label="t('lineConnect.cropMaxEdge')"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                />
+                <v-text-field
+                  v-model.number="settings.relocateEvery"
+                  type="number"
+                  min="1"
+                  max="200"
+                  :label="t('lineConnect.relocateEvery')"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                />
+                <v-text-field
+                  v-model.number="settings.changeThreshold"
+                  type="number"
+                  min="0"
+                  max="0.2"
+                  step="0.001"
+                  :label="t('lineConnect.changeThreshold')"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                />
+              </div>
               <div class="lc-switches">
+                <v-switch
+                  v-model="settings.useBoardCrop"
+                  :label="t('lineConnect.useBoardCrop')"
+                  color="primary"
+                  density="compact"
+                  hide-details
+                />
+                <v-switch
+                  v-model="settings.skipUnchangedFrames"
+                  :label="t('lineConnect.skipUnchangedFrames')"
+                  color="primary"
+                  density="compact"
+                  hide-details
+                />
                 <v-switch
                   v-model="settings.dryRun"
                   :label="t('lineConnect.dryRun')"
@@ -314,6 +421,23 @@
                   {{ boardDetected ? t('lineConnect.found') : t('lineConnect.missing') }}
                 </span>
                 <span>{{ t('lineConnect.overlayTicks') }}: {{ tickCount }}</span>
+                <span>
+                  {{ t('lineConnect.perfMode') }}:
+                  {{
+                    lastPassMode === 'crop'
+                      ? t('lineConnect.perfCrop')
+                      : lastPassMode === 'skipped'
+                        ? t('lineConnect.perfSkipped')
+                        : t('lineConnect.perfFull')
+                  }}
+                </span>
+                <span>
+                  {{ t('lineConnect.perfChange') }}:
+                  {{ (lastChangeRatio * 100).toFixed(1) }}%
+                </span>
+                <span>
+                  {{ t('lineConnect.perfInference') }}: {{ lastInferenceMs }} ms
+                </span>
               </div>
 
               <div v-if="lastWarnings.length" class="lc-warnings">
@@ -438,6 +562,17 @@
     hideOverlay,
     refreshOverlayVisible,
     canDrawOverlays,
+    lastChangeRatio,
+    lastPassMode,
+    lastInferenceMs,
+    sampleCount,
+    chessboardVisible,
+    toggleChessboard,
+    refreshChessboardVisible,
+    refreshNativeCounters,
+    isSampleRecording,
+    toggleSampleRecording,
+    samplePath,
     requestCapturePermission,
     openAccessibilitySettings,
     startCapture,
@@ -453,6 +588,8 @@
   const captureRunning = ref(false)
   const a11yOk = ref(false)
   const overlayOk = ref(false)
+  const sampleRecording = ref(false)
+  const samplePathText = ref('')
   const engineOk = computed(() => !!engine?.isEngineLoaded?.value)
 
   const logContainer = ref<HTMLElement | null>(null)
@@ -475,6 +612,16 @@
     a11yOk.value = hasAccessibility()
     overlayOk.value = isSupported() && canDrawOverlays()
     refreshOverlayVisible()
+    refreshChessboardVisible()
+    refreshNativeCounters()
+    sampleRecording.value = isSampleRecording()
+    samplePathText.value = samplePath()
+  }
+
+  function onToggleSamples() {
+    toggleSampleRecording()
+    sampleRecording.value = isSampleRecording()
+    samplePathText.value = samplePath()
   }
 
   function grantOverlay() {
@@ -590,6 +737,13 @@
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 10px;
     margin-bottom: 8px;
+  }
+
+  .lc-check__path {
+    margin: 6px 0 0;
+    font-size: 11px;
+    opacity: 0.6;
+    word-break: break-all;
   }
 
   .lc-switches {

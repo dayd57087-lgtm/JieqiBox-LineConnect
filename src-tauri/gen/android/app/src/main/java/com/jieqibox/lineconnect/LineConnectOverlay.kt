@@ -42,6 +42,7 @@ class LineConnectOverlay(
         const val ACTION_AUTO = "auto"
         const val ACTION_VARIATION = "variation"
         const val ACTION_BOARD = "board"
+        const val ACTION_APP = "app"
         const val ACTION_COLLAPSE = "collapse"
         const val ACTION_CLOSE = "close"
 
@@ -257,6 +258,13 @@ class LineConnectOverlay(
         }
         buttonRow.addView(spacer)
 
+        buttonRow.addView(
+            makeButton(
+                context.getString(R.string.line_connect_overlay_app),
+                ACTION_APP,
+                COLOR_BTN
+            )
+        )
         buttonRow.addView(
             makeButton("\u2715", ACTION_CLOSE, COLOR_BTN, compact = true)
         )

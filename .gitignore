@@ -119,3 +119,7 @@ src-tauri/Cargo.lock
 # GUI config file
 src-tauri/config.ini
 src-tauri/jieqi_openings.jb
+
+# Python tooling caches
+__pycache__/
+*.pyc

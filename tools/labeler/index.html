@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>JieqiBox 连线 · 样本标注</title>
+    <style>
+      :root {
+        --bg: #14161a;
+        --panel: #1e2127;
+        --line: #2e333c;
+        --text: #e6e8eb;
+        --dim: #9aa1ad;
+        --accent: #4c8dff;
+        --warn: #ffb020;
+        --ok: #35c46a;
+      }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body {
+        margin: 0; height: 100%; background: var(--bg); color: var(--text);
+        font: 14px/1.45 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+        overflow: hidden;
+      }
+      #app { display: flex; flex-direction: column; height: 100%; }
+
+      header {
+        display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+        background: var(--panel); border-bottom: 1px solid var(--line); flex: 0 0 auto;
+        flex-wrap: wrap;
+      }
+      header .title { font-weight: 600; margin-right: auto; }
+      button, select, label.btn {
+        background: #2a2f38; color: var(--text); border: 1px solid var(--line);
+        border-radius: 7px; padding: 7px 11px; font-size: 13px; cursor: pointer;
+      }
+      button:active { transform: translateY(1px); }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button.danger { background: #7a2b2b; border-color: #7a2b2b; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+
+      #stage { position: relative; flex: 1 1 auto; overflow: hidden; background: #0b0c0f; touch-action: none; }
+      #wrap { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+      #img { display: block; max-width: none; image-rendering: auto; }
+      #cv { position: absolute; left: 0; top: 0; pointer-events: none; }
+
+      #hud {
+        position: absolute; left: 8px; top: 8px; padding: 5px 9px; border-radius: 6px;
+        background: rgba(0,0,0,.6); font-size: 12px; pointer-events: none; white-space: pre;
+      }
+      #hint {
+        position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+        color: var(--dim); text-align: center; padding: 24px; line-height: 1.9;
+      }
+
+      footer {
+        flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--line);
+        padding: 7px 10px; display: flex; gap: 10px; align-items: center; overflow-x: auto;
+      }
+      #classes { display: flex; gap: 6px; }
+      .cls {
+        padding: 5px 9px; border-radius: 6px; border: 1px solid var(--line);
+        background: #23272e; font-size: 12px; white-space: nowrap; cursor: pointer;
+      }
+      .cls.on { outline: 2px solid var(--accent); background: #2c3444; }
+      .cls .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+      #status { margin-left: auto; color: var(--dim); font-size: 12px; white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <span class="title">样本标注</span>
+        <label class="btn" for="pick">选择图片</label>
+        <input id="pick" type="file" accept="image/*,.json" multiple hidden />
+        <button id="mode" title="在“画框”和“选择/移动”之间切换">工具：画框</button>
+        <button id="prev">上一张</button>
+        <button id="next">下一张</button>
+        <button id="fit">适应</button>
+        <button id="clear" class="danger">清空本张</button>
+        <button id="export" class="primary">导出</button>
+      </header>
+
+      <div id="stage">
+        <div id="wrap">
+          <img id="img" alt="" />
+          <canvas id="cv"></canvas>
+        </div>
+        <div id="hud"></div>
+        <div id="hint">
+          点「选择图片」一次选中该文件夹里的<br />
+          <b>sample_*.jpg</b> 与 <b>sample_*.json</b><br />
+          （可多选。json 里带着模型已经识别出的框，只需修正即可）<br /><br />
+          画框 → 在图上拖动　·　选择工具 → 拖动框移动、拖右下角改大小<br />
+          选中框后按 Delete 删除　·　按 1–9 快速切类别<br />
+          双指缩放 / 单指拖动空白处平移
+        </div>
+      </div>
+
+      <footer>
+        <div id="classes"></div>
+        <div id="status">未加载</div>
+      </footer>
+    </div>
+
+    <script>
+      /* ------------------------------------------------------------------ *
+       * Class list — must stay in the same order as LABELS in
+       * src/composables/image-recognition/types.ts, because the model's class
+       * index is what the exported labels use.
+       * ------------------------------------------------------------------ */
+      const CLASSES = [
+        '2', '3', '4', '5', 'Board',
+        'b_advisor', 'b_cannon', 'b_chariot', 'b_elephant', 'b_general', 'b_horse', 'b_soldier',
+        'dark', 'dark_b_advisor', 'dark_b_cannon', 'dark_b_chariot', 'dark_b_elephant',
+        'dark_b_general', 'dark_b_horse', 'dark_b_soldier',
+        'dark_r_advisor', 'dark_r_cannon', 'dark_r_chariot', 'dark_r_elephant', 'dark_r_general',
+        'dark_r_horse', 'dark_r_soldier',
+        'r_advisor', 'r_cannon', 'r_chariot', 'r_elephant', 'r_general', 'r_horse', 'r_soldier',
+      ]
+      const CLASS_COLORS = CLASSES.map((_, i) => `hsl(${(i * 47) % 360} 80% 60%)`)
+      const DEFAULT_CLASS = CLASSES.indexOf('dark_r_advisor')
+
+      /* ------------------------------- state ---------------------------- */
+      const images = []                 // { name, url, w, h, boxes: [] }
+      const boxesByImage = new Map()    // name -> boxes
+      let index = -1
+      let currentClass = DEFAULT_CLASS
+      let tool = 'draw'                 // 'draw' | 'select'
+      let selected = -1
+      let scale = 1, tx = 0, ty = 0
+      let filesByName = new Map()
+
+      const $ = id => document.getElementById(id)
+      const imgEl = $('img'), cv = $('cv'), stage = $('stage'), wrap = $('wrap'), hud = $('hud'), hint = $('hint')
+
+      /* ------------------------------ helpers --------------------------- */
+      function currentBoxes() {
+        const im = images[index]
+        return im ? (boxesByImage.get(im.name) || []) : []
+      }
+
+      // Boxes are stored normalized: { c: classIndex, cx, cy, w, h }
+      function toDisplay(b) {
+        const im = images[index]
+        return {
+          x: (b.cx - b.w / 2) * im.w,
+          y: (b.cy - b.h / 2) * im.h,
+          w: b.w * im.w,
+          h: b.h * im.h,
+        }
+      }
+      function fromDisplay(x, y, w, h) {
+        const im = images[index]
+        return {
+          c: currentClass,
+          cx: (x + w / 2) / im.w,
+          cy: (y + h / 2) / im.h,
+          w: w / im.w,
+          h: h / im.h,
+        }
+      }
+      const clamp01 = v => Math.min(1, Math.max(0, v))
+
+      function render() {
+        const boxes = currentBoxes()
+        const im = images[index]
+        if (!im) return
+        cv.width = im.w
+        cv.height = im.h
+        cv.style.width = im.w + 'px'
+        cv.style.height = im.h + 'px'
+        const ctx = cv.getContext('2d')
+        ctx.clearRect(0, 0, im.w, im.h)
+        ctx.lineWidth = Math.max(1.5, im.w / 500)
+        ctx.font = `${Math.max(11, im.w / 55)}px sans-serif`
+        ctx.textBaseline = 'top'
+
+        boxes.forEach((b, i) => {
+          const d = toDisplay(b)
+          const color = CLASS_COLORS[b.c] || '#fff'
+          if (b.auto) ctx.setLineDash([6, 5]); else ctx.setLineDash([])
+          ctx.strokeStyle = color
+          ctx.strokeRect(d.x, d.y, d.w, d.h)
+          if (i === selected) {
+            ctx.setLineDash([])
+            ctx.lineWidth = Math.max(2.5, im.w / 300)
+            ctx.strokeStyle = '#fff'
+            ctx.strokeRect(d.x - 1, d.y - 1, d.w + 2, d.h + 2)
+            ctx.lineWidth = Math.max(1.5, im.w / 500)
+            // resize handle
+            ctx.fillStyle = '#fff'
+            const s = Math.max(10, im.w / 60)
+            ctx.fillRect(d.x + d.w - s, d.y + d.h - s, s, s)
+          }
+          const label = CLASSES[b.c]
+          const tw = ctx.measureText(label).width
+          ctx.fillStyle = color
+          ctx.fillRect(d.x, Math.max(0, d.y - 16), tw + 6, 16)
+          ctx.fillStyle = '#000'
+          ctx.fillText(label, d.x + 3, Math.max(0, d.y - 15))
+        })
+
+        wrap.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`
+        hud.textContent =
+          `${index + 1}/${images.length}  ${im.name}\n` +
+          `框数 ${boxes.length}  ·  缩放 ${(scale * 100).toFixed(0)}%`
+        $('status').textContent =
+          `共 ${images.length} 张 · 已标注 ${[...boxesByImage.values()].filter(b => b.length).length} 张`
+      }
+
+      function fit() {
+        const im = images[index]
+        if (!im) return
+        const r = stage.getBoundingClientRect()
+        scale = Math.min(r.width / im.w, r.height / im.h) * 0.98
+        tx = (r.width - im.w * scale) / 2
+        ty = (r.height - im.h * scale) / 2
+        render()
+      }
+
+      function selectImage(i) {
+        if (i < 0 || i >= images.length) return
+        index = i; selected = -1
+        const im = images[index]
+        imgEl.src = im.url
+        imgEl.onload = () => { fit() }
+        hint.style.display = 'none'
+      }
+
+      /* --------------------------- file loading ------------------------- */
+      $('pick').addEventListener('change', async e => {
+        const files = [...e.target.files]
+        if (!files.length) return
+        for (const f of files) filesByName.set(f.name, f)
+
+        const jsons = new Map()
+        for (const f of files) {
+          if (f.name.toLowerCase().endsWith('.json')) {
+            try { jsons.set(f.name.replace(/\.json$/i, ''), JSON.parse(await f.text())) }
+            catch (err) { console.warn('bad json', f.name, err) }
+          }
+        }
+
+        for (const f of files) {
+          if (!f.type.startsWith('image/')) continue
+          const name = f.name
+          if (images.some(im => im.name === name)) continue
+          const url = URL.createObjectURL(f)
+          const probe = new Image()
+          await new Promise(res => { probe.onload = res; probe.onerror = res; probe.src = url })
+          images.push({ name, url, w: probe.naturalWidth, h: probe.naturalHeight })
+          images.sort((a, b) => a.name.localeCompare(b.name))
+
+          // Pre-fill from the sidecar written by the app.
+          const stem = name.replace(/\.(jpg|jpeg|png)$/i, '')
+          const side = jsons.get(stem)
+          if (side && Array.isArray(side.boxes) && side.imageWidth) {
+            const sx = probe.naturalWidth / side.imageWidth
+            const sy = probe.naturalHeight / (side.imageHeight || side.imageWidth)
+            boxesByImage.set(name, side.boxes.map(b => ({
+              c: b.cls,
+              cx: ((b.x + b.w / 2) * sx) / probe.naturalWidth,
+              cy: ((b.y + b.h / 2) * sy) / probe.naturalHeight,
+              w: (b.w * sx) / probe.naturalWidth,
+              h: (b.h * sy) / probe.naturalHeight,
+              auto: true,
+            })))
+          }
+        }
+
+        if (index < 0 && images.length) selectImage(0)
+        else render()
+        e.target.value = ''
+      })
+
+      /* ----------------------------- classes ---------------------------- */
+      const classBar = $('classes')
+      CLASSES.forEach((name, i) => {
+        const el = document.createElement('span')
+        el.className = 'cls'
+        el.dataset.i = i
+        el.innerHTML = `<span class="dot" style="background:${CLASS_COLORS[i]}"></span>${name}`
+        el.onclick = () => setClass(i)
+        classBar.appendChild(el)
+      })
+      function setClass(i) {
+        currentClass = i
+        ;[...classBar.children].forEach(el => el.classList.toggle('on', +el.dataset.i === i))
+        const boxes = currentBoxes()
+        if (selected >= 0 && boxes[selected]) {
+          boxes[selected].c = i
+          boxes[selected].auto = false
+          render()
+        }
+        const on = classBar.children[i]
+        if (on) on.scrollIntoView({ inline: 'center', block: 'nearest' })
+      }
+      setClass(currentClass)
+
+      /* ------------------------------ pointer --------------------------- */
+      let drag = null          // { mode, startX, startY, box, origX, origY, origW, origH, index }
+      let pan = null
+
+      function stagePoint(ev) {
+        const r = stage.getBoundingClientRect()
+        return {
+          x: (ev.clientX - r.left - tx) / scale,
+          y: (ev.clientY - r.top - ty) / scale,
+        }
+      }
+
+      function hitTest(p) {
+        const boxes = currentBoxes()
+        for (let i = boxes.length - 1; i >= 0; i--) {
+          const d = toDisplay(boxes[i])
+          const s = Math.max(14, im.w / 45) / scale
+          if (p.x >= d.x + d.w - s && p.x <= d.x + d.w + s &&
+              p.y >= d.y + d.h - s && p.y <= d.y + d.h + s) {
+            return { index: i, mode: 'resize' }
+          }
+          if (p.x >= d.x && p.x <= d.x + d.w && p.y >= d.y && p.y <= d.y + d.h) {
+            return { index: i, mode: 'move' }
+          }
+        }
+        return null
+      }
+
+      stage.addEventListener('pointerdown', ev => {
+        if (index < 0) return
+        const im = images[index]
+        const p = stagePoint(ev)
+        stage.setPointerCapture(ev.pointerId)
+
+        const hit = hitTest(p)
+        if (hit) {
+          selected = hit.index
+          const b = currentBoxes()[hit.index]
+          const d = toDisplay(b)
+          drag = { mode: hit.mode, startX: p.x, startY: p.y, origX: d.x, origY: d.y, origW: d.w, origH: d.h }
+          render()
+          return
+        }
+
+        selected = -1
+        if (tool === 'draw') {
+          drag = { mode: 'new', startX: p.x, startY: p.y, curX: p.x, curY: p.y }
+          render()
+        } else {
+          pan = { x: ev.clientX - tx, y: ev.clientY - ty }
+        }
+      })
+
+      stage.addEventListener('pointermove', ev => {
+        if (!drag && !pan) return
+        const im = images[index]
+        if (pan) { tx = ev.clientX - pan.x; ty = ev.clientY - pan.y; render(); return }
+
+        const p = stagePoint(ev)
+        if (drag.mode === 'new') {
+          drag.curX = p.x; drag.curY = p.y
+          const ctx = cv.getContext('2d')
+          render()
+          ctx.setLineDash([6, 5])
+          ctx.strokeStyle = CLASS_COLORS[currentClass]
+          ctx.lineWidth = Math.max(2, im.w / 400)
+          ctx.strokeRect(
+            Math.min(drag.startX, drag.curX), Math.min(drag.startY, drag.curY),
+            Math.abs(drag.curX - drag.startX), Math.abs(drag.curY - drag.startY)
+          )
+          return
+        }
+
+        const boxes = currentBoxes()
+        const b = boxes[selected]
+        if (!b) return
+        const dx = p.x - drag.startX
+        const dy = p.y - drag.startY
+        if (drag.mode === 'move') {
+          const nx = Math.min(Math.max(0, drag.origX + dx), im.w - drag.origW)
+          const ny = Math.min(Math.max(0, drag.origY + dy), im.h - drag.origH)
+          Object.assign(b, fromDisplay(nx, ny, drag.origW, drag.origH), { c: b.c, auto: false })
+        } else {
+          const w = Math.max(8, drag.origW + dx)
+          const h = Math.max(8, drag.origH + dy)
+          Object.assign(b, fromDisplay(drag.origX, drag.origY, w, h), { c: b.c, auto: false })
+        }
+        render()
+      })
+
+      function endDrag() {
+        if (drag && drag.mode === 'new') {
+          const w = Math.abs(drag.curX - drag.startX)
+          const h = Math.abs(drag.curY - drag.startY)
+          const minSide = Math.max(8, im_probe().w / 60)
+          if (w > minSide && h > minSide) {
+            const boxes = currentBoxes()
+            boxes.push({
+              ...fromDisplay(
+                Math.min(drag.startX, drag.curX), Math.min(drag.startY, drag.curY), w, h
+              ),
+              auto: false,
+            })
+            selected = boxes.length - 1
+          }
+        }
+        drag = null; pan = null
+        render()
+      }
+      function im_probe() { return images[index] || { w: 1000, h: 1000 } }
+      stage.addEventListener('pointerup', endDrag)
+      stage.addEventListener('pointercancel', endDrag)
+      stage.addEventListener('pointerleave', () => { if (drag || pan) endDrag() })
+
+      // Wheel zoom (desktop) — pinch on mobile is handled by the browser UI.
+      stage.addEventListener('wheel', ev => {
+        ev.preventDefault()
+        const r = stage.getBoundingClientRect()
+        const mx = ev.clientX - r.left, my = ev.clientY - r.top
+        const k = ev.deltaY < 0 ? 1.12 : 1 / 1.12
+        tx = mx - (mx - tx) * k
+        ty = my - (my - ty) * k
+        scale *= k
+        render()
+      }, { passive: false })
+
+      /* ---------------------------- keyboard ---------------------------- */
+      addEventListener('keydown', ev => {
+        if (ev.key === 'Delete' || ev.key === 'Backspace') {
+          const boxes = currentBoxes()
+          if (selected >= 0 && boxes[selected]) {
+            boxes.splice(selected, 1)
+            selected = -1
+            render()
+            ev.preventDefault()
+          }
+          return
+        }
+        if (/^[1-9]$/.test(ev.key)) {
+          const i = +ev.key - 1
+          if (i < CLASSES.length) setClass(i)
+          return
+        }
+        if (ev.key === 'ArrowRight') $('next').click()
+        if (ev.key === 'ArrowLeft') $('prev').click()
+      })
+
+      /* ----------------------------- toolbar ---------------------------- */
+      $('mode').onclick = () => {
+        tool = tool === 'draw' ? 'select' : 'draw'
+        $('mode').textContent = tool === 'draw' ? '工具：画框' : '工具：选择/移动'
+      }
+      $('prev').onclick = () => selectImage(index - 1)
+      $('next').onclick = () => { if (index + 1 < images.length) selectImage(index + 1) }
+      $('fit').onclick = () => fit()
+      $('clear').onclick = () => {
+        const im = images[index]
+        if (!im) return
+        boxesByImage.set(im.name, [])
+        selected = -1
+        render()
+      }
+
+      $('export').onclick = () => {
+        const out = {
+          classes: CLASSES,
+          images: images.map(im => ({
+            file: im.name,
+            width: im.w,
+            height: im.h,
+            boxes: (boxesByImage.get(im.name) || []).map(b => ({
+              cls: b.c,
+              cx: +b.cx.toFixed(6),
+              cy: +b.cy.toFixed(6),
+              w: +b.w.toFixed(6),
+              h: +b.h.toFixed(6),
+            })),
+          })),
+        }
+        const blob = new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' })
+        const a = document.createElement('a')
+        a.href = URL.createObjectURL(blob)
+        a.download = 'annotations.json'
+        a.click()
+        URL.revokeObjectURL(a.href)
+      }
+
+      addEventListener('resize', () => { if (index >= 0) fit() })
+    </script>
+  </body>
+</html>

@@ -295,6 +295,56 @@ export function fenPositionKey(fen: string): string {
   return parts.slice(0, 2).join(' ')
 }
 
+/**
+ * Builds the grid from a detection pass that was run on a tight crop of the
+ * board.
+ *
+ * Because the crop is already aligned to the board's bounding box, the piece
+ * position inside the crop maps linearly onto the 9x10 lattice; no `Board`
+ * detection (and no bilinear quad) is needed. This is both faster and more
+ * accurate than the full-frame path.
+ */
+export function gridFromBoardCrop(
+  boxes: DetectionBox[],
+  cropWidth: number,
+  cropHeight: number,
+  minScore = 0
+): { grid: Grid; overlaps: number } {
+  const grid = emptyGrid()
+  let overlaps = 0
+
+  if (cropWidth <= 0 || cropHeight <= 0) {
+    return { grid, overlaps }
+  }
+
+  for (const box of boxes) {
+    if (box.score < minScore) continue
+    const label = LABELS[box.labelIndex]?.name
+    if (!label || label === 'Board') continue
+
+    const [bx, by, bw, bh] = box.box
+    const cx = bx + bw / 2
+    const cy = by + bh / 2
+
+    const u = cx / cropWidth
+    const v = cy / cropHeight
+    if (u < -0.05 || u > 1.05 || v < -0.05 || v > 1.05) continue
+
+    const col = Math.round(u * (BOARD_COLS - 1))
+    const row = Math.round(v * (BOARD_ROWS - 1))
+    if (row < 0 || row >= BOARD_ROWS || col < 0 || col >= BOARD_COLS) continue
+
+    const existing = grid[row][col]
+    if (existing) {
+      overlaps++
+      if (existing.score >= box.score) continue
+    }
+    grid[row][col] = box
+  }
+
+  return { grid, overlaps }
+}
+
 /* ------------------------------------------------------------------------- */
 /* Coordinates                                                               */
 /* ------------------------------------------------------------------------- */

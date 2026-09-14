@@ -84,6 +84,112 @@ class LineConnectBridge(private val activity: MainActivity) {
         }
     }
 
+    /**
+     * Returns a cropped region of the newest frame as a base64 JPEG.
+     *
+     * Once the board has been located the loop only needs the board, so sending
+     * a tight crop instead of a whole screenshot cuts the JS-bridge payload by
+     * roughly an order of magnitude and makes the detected pieces much larger
+     * relative to the model input.
+     */
+    @JavascriptInterface
+    fun captureCrop(
+        left: Int,
+        top: Int,
+        width: Int,
+        height: Int,
+        maxEdge: Int
+    ): String {
+        val service = ScreenCaptureService.instance ?: return ""
+        return try {
+            service.captureFrameCropBase64(left, top, width, height, maxEdge) ?: ""
+        } catch (e: Exception) {
+            Log.w(TAG, "captureCrop failed", e)
+            ""
+        }
+    }
+
+    /**
+     * Fraction of the frame that changed since the previous captured frame.
+     * The JS loop uses this to skip inference while nothing is happening.
+     */
+    @JavascriptInterface
+    fun frameChangeRatio(): Double {
+        return ScreenCaptureService.instance?.frameChangeRatio() ?: 1.0
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Floating chessboard                                                 */
+    /* ------------------------------------------------------------------ */
+
+    /** Shows the movable / resizable chessboard overlay. */
+    @JavascriptInterface
+    fun showChessboard(): Boolean {
+        val service = ScreenCaptureService.instance ?: return false
+        return service.ensureChessboard()
+    }
+
+    @JavascriptInterface
+    fun hideChessboard() {
+        ScreenCaptureService.instance?.hideChessboard()
+    }
+
+    @JavascriptInterface
+    fun isChessboardVisible(): Boolean {
+        return ScreenCaptureService.instance?.isChessboardVisible() == true
+    }
+
+    /** Pushes the recognised position (Jieqi FEN) into the floating chessboard. */
+    @JavascriptInterface
+    fun setChessboardFen(fen: String) {
+        ScreenCaptureService.instance?.setChessboardFen(fen)
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Sample recording (dataset collection for fine-tuning)               */
+    /* ------------------------------------------------------------------ */
+
+    @JavascriptInterface
+    fun startSampleRecording(): Boolean {
+        val service = ScreenCaptureService.instance ?: return false
+        return service.startSampleRecording()
+    }
+
+    @JavascriptInterface
+    fun stopSampleRecording() {
+        ScreenCaptureService.instance?.stopSampleRecording()
+    }
+
+    @JavascriptInterface
+    fun isSampleRecording(): Boolean {
+        return ScreenCaptureService.instance?.isSampleRecording() == true
+    }
+
+    @JavascriptInterface
+    fun sampleCount(): Int = ScreenCaptureService.instance?.sampleCount() ?: 0
+
+    /** Folder holding the recorded samples, empty when not recording. */
+    @JavascriptInterface
+    fun samplePath(): String = ScreenCaptureService.instance?.samplePath() ?: ""
+
+    /**
+     * Saves the newest frame together with the recognition result.
+     *
+     * @param annotationJson boxes produced by the current model, so the
+     *                       labelling tool can pre-fill them for correction
+     */
+    @JavascriptInterface
+    fun saveSample(annotationJson: String): Boolean {
+        val service = ScreenCaptureService.instance ?: return false
+        return service.saveSample(annotationJson)
+    }
+
+    /** Asks for the legacy storage permission used by the public sample folder. */
+    @JavascriptInterface
+    fun requestStoragePermission() {
+        activity.requestLegacyStoragePermission()
+    }
+
     /** JSON describing the capture session. */
     @JavascriptInterface
     fun captureStatus(): String {

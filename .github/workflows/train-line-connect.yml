@@ -1,0 +1,198 @@
+name: Train Line Connect Model
+
+# Fine-tunes the piece detector on screenshots labelled with tools/labeler.
+#
+# How to run:
+#   1. Record samples in the app (面板 → 样本采集 → 开始采集)
+#   2. Label them with tools/labeler/index.html and export annotations.json
+#   3. Build the dataset locally:
+#        python3 tools/dataset/build_dataset.py --samples ./samples \
+#            --annotations annotations.json --out dataset
+#   4. Upload the dataset folder as an artifact, or commit it to the repo
+#   5. Run this workflow
+#
+# The finished best.onnx is published to the "line-connect-model" release, which
+# the APK build prefers over the upstream weights.
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'Training epochs'
+        required: false
+        default: '60'
+      imgsz:
+        description: 'Training image size'
+        required: false
+        default: '640'
+      batch:
+        description: 'Batch size'
+        required: false
+        default: '8'
+      base_weights:
+        description: 'Starting weights (URL or local path)'
+        required: false
+        default: 'https://github.com/Velithia/JieqiModels/releases/download/yolo-models/best.pt'
+      dataset_artifact:
+        description: 'Artifact name holding the dataset folder (blank = use ./dataset in the repo)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    name: Fine-tune YOLO detector
+    runs-on: ubuntu-latest
+    # CPU training of a small detector; generous but inside the 6h job limit.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ultralytics
+        run: |
+          python -m pip install --upgrade pip
+          pip install ultralytics onnx onnxslim
+
+      - name: Fetch dataset from artifact
+        if: ${{ inputs.dataset_artifact != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.dataset_artifact }}
+          path: dataset
+
+      - name: Locate dataset
+        id: ds
+        run: |
+          set -euo pipefail
+          # An artifact may unpack one level deep, so find data.yaml anywhere.
+          YAML=$(find . -name data.yaml -not -path './node_modules/*' | head -n 1)
+          if [ -z "$YAML" ]; then
+            echo "::error::No data.yaml found. Build the dataset first (see tools/dataset/README notes)."
+            exit 1
+          fi
+          DIR=$(dirname "$YAML")
+          # data.yaml written on a laptop carries an absolute path; rewrite it.
+          python - "$YAML" <<'PY'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          lines = p.read_text(encoding="utf-8").splitlines()
+          out = []
+          for line in lines:
+              if line.startswith("path:"):
+                  out.append(f"path: {p.parent.resolve()}")
+              else:
+                  out.append(line)
+          p.write_text("\n".join(out) + "\n", encoding="utf-8")
+          PY
+          echo "dataset=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Found dataset at $DIR"
+          python -c "
+          import yaml,sys
+          d=yaml.safe_load(open('$YAML'))
+          print('classes:', d.get('nc'))
+          "
+          find "$DIR/images" -type f | wc -l | xargs echo "images:"
+
+      - name: Fetch base weights
+        id: base
+        run: |
+          set -euo pipefail
+          W="${{ inputs.base_weights }}"
+          case "$W" in
+            http*)
+              curl -L --fail -o base.pt "$W"
+              ;;
+            *)
+              cp "$W" base.pt
+              ;;
+          esac
+          ls -lh base.pt
+
+      - name: Train
+        env:
+          EPOCHS: ${{ inputs.epochs }}
+          IMGSZ: ${{ inputs.imgsz }}
+          BATCH: ${{ inputs.batch }}
+          DATA: ${{ steps.ds.outputs.dataset }}/data.yaml
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from ultralytics import YOLO
+
+          model = YOLO("base.pt")
+          model.train(
+              data=os.environ["DATA"],
+              epochs=int(os.environ["EPOCHS"]),
+              imgsz=int(os.environ["IMGSZ"]),
+              batch=int(os.environ["BATCH"]),
+              project="runs",
+              name="jieqi",
+              exist_ok=True,
+              patience=20,
+              # CPU runner: keep the dataloader light and skip plotting extras.
+              workers=2,
+              plots=False,
+              val=True,
+          )
+          PY
+          echo "--- training finished ---"
+          ls -R runs/jieqi/weights || true
+
+      - name: Export to ONNX
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from ultralytics import YOLO
+          # Same export shape the app expects: fixed 640 input, opset 12, simplified.
+          model = YOLO("runs/jieqi/weights/best.pt")
+          path = model.export(format="onnx", imgsz=640, opset=12, simplify=True, dynamic=False)
+          print("exported:", path)
+          PY
+          ls -lh runs/jieqi/weights/
+          cp runs/jieqi/weights/best.onnx best.onnx
+          ls -lh best.onnx
+
+      - name: Sanity check the exported model
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import numpy as np, onnxruntime as ort
+          sess = ort.InferenceSession("best.onnx", providers=["CPUExecutionProvider"])
+          i = sess.get_inputs()[0]
+          o = sess.get_outputs()[0]
+          print("input :", i.name, i.shape, i.type)
+          print("output:", o.name, o.shape, o.type)
+          dummy = np.zeros((1, 3, 640, 640), dtype=np.float32)
+          out = sess.run([o.name], {i.name: dummy})[0]
+          print("inference ok, output shape", out.shape)
+          assert out.shape[-1] == 4 + 34 or out.shape[1] == 4 + 34, "unexpected class count"
+          PY
+
+      - name: Upload trained model
+        uses: actions/upload-artifact@v4
+        with:
+          name: jieqibox-best-onnx
+          path: best.onnx
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish to the model release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="line-connect-model"
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" best.onnx \
+            --title "JieqiBox 自定义识别模型" \
+            --notes "由 train-line-connect.yml 微调产出。APK 构建会优先使用这个模型。" \
+            --prerelease
+          echo "Done. 重新运行 Build Line Connect APK 即可把新模型打进 APK。"

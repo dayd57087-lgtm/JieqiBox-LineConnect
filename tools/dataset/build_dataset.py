@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Turn labelled samples into a YOLO dataset.
+
+Input
+-----
+A folder holding the screenshots recorded by the app (``sample_*.jpg``) and an
+``annotations.json`` exported from ``tools/labeler/index.html``.
+
+Output
+------
+A standard YOLO detection layout::
+
+    out/
+      images/train/*.jpg      images/val/*.jpg
+      labels/train/*.txt      labels/val/*.txt
+      data.yaml
+
+Usage
+-----
+    python3 build_dataset.py --samples ./samples --annotations annotations.json --out ./dataset
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import shutil
+from pathlib import Path
+
+# Kept in sync with LABELS in src/composables/image-recognition/types.ts
+CLASSES = [
+    "2", "3", "4", "5", "Board",
+    "b_advisor", "b_cannon", "b_chariot", "b_elephant", "b_general", "b_horse", "b_soldier",
+    "dark", "dark_b_advisor", "dark_b_cannon", "dark_b_chariot", "dark_b_elephant",
+    "dark_b_general", "dark_b_horse", "dark_b_soldier",
+    "dark_r_advisor", "dark_r_cannon", "dark_r_chariot", "dark_r_elephant", "dark_r_general",
+    "dark_r_horse", "dark_r_soldier",
+    "r_advisor", "r_cannon", "r_chariot", "r_elephant", "r_general", "r_horse", "r_soldier",
+]
+
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--samples", required=True, help="folder with sample_*.jpg")
+    ap.add_argument("--annotations", required=True, help="annotations.json exported by the labeler")
+    ap.add_argument("--out", default="dataset", help="output dataset folder")
+    ap.add_argument("--val-ratio", type=float, default=0.15, help="fraction used for validation")
+    ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--classes", default="", help="override classes.txt (one name per line)")
+    return ap.parse_args()
+
+
+def load_classes(override: str) -> list[str]:
+    if not override:
+        return CLASSES
+    path = Path(override)
+    if path.is_file():
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [c.strip() for c in override.split(",") if c.strip()]
+
+
+def clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def main() -> int:
+    args = parse_args()
+    classes = load_classes(args.classes)
+    samples_dir = Path(args.samples)
+    out_dir = Path(args.out)
+
+    if not samples_dir.is_dir():
+        raise SystemExit(f"samples folder not found: {samples_dir}")
+
+    with open(args.annotations, encoding="utf-8") as fh:
+        payload = json.load(fh)
+
+    images = payload.get("images") or []
+    if not images:
+        raise SystemExit("annotations.json contains no images")
+
+    # Start clean so a re-run never mixes with a previous build.
+    for sub in ("images/train", "images/val", "labels/train", "labels/val"):
+        target = out_dir / sub
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
+
+    entries = []
+    skipped_missing = 0
+    skipped_empty = 0
+
+    for item in images:
+        name = item.get("file")
+        if not name:
+            continue
+        source = samples_dir / name
+        if not source.is_file():
+            skipped_missing += 1
+            continue
+
+        boxes = item.get("boxes") or []
+        lines = []
+        for box in boxes:
+            cls = int(box.get("cls", -1))
+            if cls < 0 or cls >= len(classes):
+                continue
+            w = float(box.get("w", 0))
+            h = float(box.get("h", 0))
+            if w <= 0 or h <= 0:
+                continue
+            lines.append(
+                f"{cls} {clamp01(float(box['cx'])):.6f} {clamp01(float(box['cy'])):.6f} "
+                f"{clamp01(w):.6f} {clamp01(h):.6f}"
+            )
+
+        if not lines:
+            # An image with no objects is still useful background, but YOLO
+            # training expects a label file to exist; keep it empty on purpose.
+            skipped_empty += 1
+
+        entries.append((source, lines))
+
+    if not entries:
+        raise SystemExit("no usable samples found (are the images in --samples?)")
+
+    random.Random(args.seed).shuffle(entries)
+    val_count = max(1, int(len(entries) * args.val_ratio)) if len(entries) > 5 else 0
+    val_set = entries[:val_count]
+    train_set = entries[val_count:]
+
+    def write(split: str, items: list) -> None:
+        for source, lines in items:
+            shutil.copy2(source, out_dir / "images" / split / source.name)
+            label_path = out_dir / "labels" / split / (source.stem + ".txt")
+            label_path.write_text("\n".join(lines), encoding="utf-8")
+
+    write("train", train_set)
+    write("val", val_set)
+
+    data_yaml = out_dir / "data.yaml"
+    data_yaml.write_text(
+        "# generated by tools/dataset/build_dataset.py\n"
+        f"path: {out_dir.resolve()}\n"
+        "train: images/train\n"
+        "val: images/val\n"
+        "nc: %d\n" % len(classes)
+        + "names:\n"
+        + "".join(f"  {i}: {name}\n" for i, name in enumerate(classes)),
+        encoding="utf-8",
+    )
+
+    print(f"classes      : {len(classes)}")
+    print(f"images total : {len(entries)}  (train {len(train_set)} / val {len(val_set)})")
+    print(f"images w/o box: {skipped_empty}")
+    if skipped_missing:
+        print(f"missing files : {skipped_missing}")
+    print(f"written to   : {out_dir.resolve()}")
+    print(f"data.yaml    : {data_yaml.resolve()}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

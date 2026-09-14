@@ -21,6 +21,9 @@ class MainActivity : TauriActivity() {
     companion object {
         private const val TAG = "MainActivity"
 
+        /** Request code for the legacy storage permission used by sample export. */
+        private const val REQUEST_STORAGE = 0x4C53
+
         /**
          * Weak handle on the live webview so background components (the capture
          * service, the floating bar) can push events into the running app.
@@ -393,6 +396,33 @@ class MainActivity : TauriActivity() {
             startActivity(intent)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to bring the app to front", e)
+        }
+    }
+
+    /**
+     * Requests the legacy storage permissions.
+     *
+     * The app targets SDK 28, so it keeps legacy external storage access: with
+     * these permissions granted the sample recorder can write to
+     * /storage/emulated/0/Pictures where any file picker can reach the files.
+     * A refusal is not fatal, the recorder falls back to app-private storage.
+     */
+    fun requestLegacyStoragePermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val wanted = arrayOf(
+            android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            android.Manifest.permission.READ_EXTERNAL_STORAGE
+        )
+        val missing = wanted.filter {
+            checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) return
+        runOnUiThread {
+            try {
+                requestPermissions(missing.toTypedArray(), REQUEST_STORAGE)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to request storage permission", e)
+            }
         }
     }
 

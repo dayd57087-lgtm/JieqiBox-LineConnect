@@ -53,6 +53,36 @@ export interface LineConnectBridge {
   bringToFront(): void
   /** Opens the "display over other apps" system settings page. */
   openOverlaySettings(): void
+  /**
+   * Cropped capture of the newest frame. Coordinates are captured-frame pixels;
+   * much cheaper than transferring a whole screenshot once the board is located.
+   */
+  captureCrop(
+    left: number,
+    top: number,
+    width: number,
+    height: number,
+    maxEdge: number
+  ): string
+  /** Fraction (0..1) of the frame that changed since the previous frame. */
+  frameChangeRatio(): number
+
+  /* Floating chessboard (movable + resizable) */
+  showChessboard(): boolean
+  hideChessboard(): void
+  isChessboardVisible(): boolean
+  /** Pushes the recognised Jieqi FEN into the floating chessboard. */
+  setChessboardFen(fen: string): void
+
+  /* Dataset collection for fine-tuning */
+  startSampleRecording(): boolean
+  stopSampleRecording(): void
+  isSampleRecording(): boolean
+  sampleCount(): number
+  samplePath(): string
+  /** Saves the newest frame plus the recognition result as a sample pair. */
+  saveSample(annotationJson: string): boolean
+  requestStoragePermission(): void
   tap(x: number, y: number, durationMs: number): boolean
   swipe(
     fromX: number,

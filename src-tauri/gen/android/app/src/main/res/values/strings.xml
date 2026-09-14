@@ -13,5 +13,6 @@
     <string name="line_connect_overlay_variation">变招</string>
     <string name="line_connect_overlay_board">棋盘</string>
     <string name="line_connect_overlay_idle">待机</string>
+    <string name="line_connect_overlay_app">本应用</string>
     <string name="line_connect_overlay_scan">扫描</string>
 </resources>

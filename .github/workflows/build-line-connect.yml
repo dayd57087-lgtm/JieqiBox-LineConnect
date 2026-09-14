@@ -65,13 +65,27 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
-      - name: Download model (best.onnx)
+      - name: Resolve model (best.onnx)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p public/models
-          curl -L --fail -o public/models/best.onnx \
-            https://github.com/Velithia/JieqiModels/releases/download/yolo-models/best.onnx
+
+          # Prefer a model fine-tuned on the user's own screenshots
+          # (produced by train-line-connect.yml), then a committed one, then
+          # the upstream weights.
+          if [ -s models/best.onnx ]; then
+            echo "Using models/best.onnx committed to the repository"
+            cp models/best.onnx public/models/best.onnx
+          elif curl -L --fail -o public/models/best.onnx \
+              "https://github.com/${{ github.repository }}/releases/download/line-connect-model/best.onnx"; then
+            echo "Using the fine-tuned model from the line-connect-model release"
+          else
+            echo "Falling back to the upstream JieqiModels weights"
+            curl -L --fail -o public/models/best.onnx \
+              https://github.com/Velithia/JieqiModels/releases/download/yolo-models/best.onnx
+          fi
+
           test -s public/models/best.onnx
           ls -l public/models/best.onnx
 
@@ -141,6 +155,6 @@ jobs:
           cp "${{ steps.sign.outputs.apk }}" jieqibox-line-connect.apk
           gh release create "$TAG" jieqibox-line-connect.apk \
             --title "JieqiBox 连线自动走棋" \
-            --notes "自动构建产物（arm64-v8a，包名 com.jieqibox.lineconnect）。新增：切到对弈 App 后可拖动悬浮控制条（新局/扫描/自动/变招/棋盘），识别循环改由原生服务驱动以避开 WebView 后台节流。" \
+            --notes "自动构建产物（arm64-v8a，包名 com.jieqibox.lineconnect）。与官方 JieqiBox 包名不同，可同时安装、互不影响。" \
             --prerelease
           echo "Download: https://github.com/${{ github.repository }}/releases/download/$TAG/jieqibox-line-connect.apk"

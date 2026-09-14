@@ -20,6 +20,7 @@ import {
   buildJieqiFen,
   countRevealedChars,
   fenPositionKey,
+  gridFromBoardCrop,
   gridToImagePoint,
   quadFromBox,
   uciToSquares,
@@ -65,6 +66,14 @@ export function useLineConnect(deps: LineConnectDeps) {
   const overlaySupported = ref(false)
   const tickCount = ref(0)
 
+  const chessboardVisible = ref(false)
+  const sampleCount = ref(0)
+  const sampleRecordingActive = ref(false)
+  const sampleDirPath = ref('')
+
+  /** Set when the user asked for the chessboard, so the FEN keeps flowing. */
+  let chessboardWanted = false
+
   const poolTracker = new JieqiPoolTracker()
 
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -90,6 +99,32 @@ export function useLineConnect(deps: LineConnectDeps) {
   let lastMoveTime = 0
 
   let overlayListenerBound = false
+
+  /**
+   * Bounding box of the board inside the captured frame (native frame pixels).
+   *
+   * Once known, every following pass only analyses this crop: the payload sent
+   * over the JS bridge shrinks by an order of magnitude and the pieces become
+   * much larger relative to the model input, which improves both speed and
+   * accuracy. Re-located periodically in case the layout moves.
+   */
+  let boardRect: {
+    left: number
+    top: number
+    width: number
+    height: number
+  } | null = null
+
+  let boardQuad: BoardQuad | null = null
+  let framesSinceLocate = 0
+
+  /** Change ratio reported by the capture service for the newest frame. */
+  const lastChangeRatio = ref(1)
+
+  /** How the last pass got its data, surfaced in the diagnostics panel. */
+  const lastPassMode = ref<'full' | 'crop' | 'skipped'>('full')
+  const lastInferenceMs = ref(0)
+  const sampleSaved = ref(0)
 
   /* ------------------------------------------------------------------ */
   /* Logging                                                             */
@@ -526,11 +561,122 @@ export function useLineConnect(deps: LineConnectDeps) {
   /* Overlay actions                                                     */
   /* ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ */
+  /* Floating chessboard + sample recording                              */
+  /* ------------------------------------------------------------------ */
+
+  function refreshChessboardVisible() {
+    try {
+      chessboardVisible.value = !!bridge()?.isChessboardVisible?.()
+    } catch {
+      // ignore
+    }
+  }
+
+  function showChessboard(): boolean {
+    const api = bridge()
+    if (!api?.showChessboard) return false
+    if (!canDrawOverlays()) {
+      log('warn', '需要「显示在其他应用上层」权限才能显示棋盘')
+      return false
+    }
+    const ok = !!api.showChessboard()
+    chessboardWanted = ok
+    chessboardVisible.value = ok
+    if (ok) {
+      log('info', '棋盘悬浮窗已显示：拖动棋盘移动，拖右下角调整大小')
+      try {
+        if (lastFen.value) api.setChessboardFen?.(lastFen.value)
+      } catch {
+        // ignore
+      }
+    } else {
+      log('warn', '棋盘显示失败，请先启动截屏服务')
+    }
+    return ok
+  }
+
+  function hideChessboard() {
+    try {
+      bridge()?.hideChessboard?.()
+    } catch {
+      // ignore
+    }
+    chessboardWanted = false
+    chessboardVisible.value = false
+  }
+
+  function toggleChessboard() {
+    if (chessboardVisible.value) hideChessboard()
+    else showChessboard()
+  }
+
+  function isSampleRecording(): boolean {
+    try {
+      return !!bridge()?.isSampleRecording?.()
+    } catch {
+      return sampleRecordingActive.value
+    }
+  }
+
+  function samplePath(): string {
+    try {
+      return bridge()?.samplePath?.() ?? sampleDirPath.value
+    } catch {
+      return sampleDirPath.value
+    }
+  }
+
+  /**
+   * Turns dataset collection on or off.
+   *
+   * Samples land in Pictures/JieqiBoxLine (falling back to app storage) as a
+   * .jpg plus a .json holding the boxes the model produced, so the labelling
+   * tool only has to correct them instead of drawing from scratch.
+   */
+  function toggleSampleRecording(): boolean {
+    const api = bridge()
+    if (!api?.startSampleRecording) return false
+    if (sampleRecordingActive.value) {
+      try {
+        api.stopSampleRecording?.()
+      } catch {
+        // ignore
+      }
+      sampleRecordingActive.value = false
+      settings.value.recordSamples = false
+      log('info', `已停止采集样本（共 ${sampleCount.value} 张）`)
+      return false
+    }
+
+    try {
+      api.requestStoragePermission?.()
+      const ok = !!api.startSampleRecording()
+      sampleRecordingActive.value = ok
+      settings.value.recordSamples = ok
+      if (ok) {
+        sampleDirPath.value = api.samplePath?.() ?? ''
+        sampleCount.value = api.sampleCount?.() ?? 0
+        log('info', `开始采集样本，保存在 ${sampleDirPath.value || '(应用目录)'}`)
+      } else {
+        log('error', '无法开始采集样本，请确认截屏服务已启动')
+      }
+      return ok
+    } catch (e) {
+      log('error', `采集样本失败：${String(e)}`)
+      return false
+    }
+  }
+
   function handleOverlayAction(action: string) {
     switch (action) {
       case 'scan':
         log('info', '悬浮窗：执行一次识别')
         void stepOnce()
+        break
+      case 'boardView':
+        // Toggle the floating chessboard (mirrors the recognised position).
+        toggleChessboard()
         break
       case 'auto':
         if (isRunning.value) stop()
@@ -549,7 +695,11 @@ export function useLineConnect(deps: LineConnectDeps) {
         resetSession()
         break
       case 'board':
-        log('info', '悬浮窗：切回 JieqiBox 查看棋盘')
+        // The 棋盘 button shows/hides the floating chessboard.
+        toggleChessboard()
+        break
+      case 'app':
+        log('info', '悬浮窗：切回 JieqiBox')
         try {
           bridge()?.bringToFront?.()
         } catch {
@@ -591,6 +741,9 @@ export function useLineConnect(deps: LineConnectDeps) {
     lastMove.value = ''
     lastFen.value = ''
     lastWarnings.value = []
+    boardRect = null
+    boardQuad = null
+    framesSinceLocate = 0
     turn = settings.value.mySide
     syncOverlay()
   }
@@ -606,6 +759,22 @@ export function useLineConnect(deps: LineConnectDeps) {
     syncOverlay()
     if (busy) return
     void runOnce()
+  }
+
+  /** Pulls counters that live on the native side. */
+  function refreshNativeCounters() {
+    const api = bridge()
+    if (!api) return
+    try {
+      sampleRecordingActive.value = !!api.isSampleRecording?.()
+      if (sampleRecordingActive.value) {
+        sampleCount.value = api.sampleCount?.() ?? sampleCount.value
+      }
+      chessboardVisible.value = !!api.isChessboardVisible?.()
+      if (chessboardVisible.value) chessboardWanted = true
+    } catch {
+      // ignore
+    }
   }
 
   function schedule(delayMs: number) {
@@ -680,40 +849,140 @@ export function useLineConnect(deps: LineConnectDeps) {
       return
     }
 
-    const base64 = api.captureFrame()
-    if (!base64) {
-      phase.value = 'waiting'
-      return
-    }
-    lastPreview.value = `data:image/jpeg;base64,${base64}`
+    const status = captureStatus()
+    const frameWidth: number = status?.frameWidth || 0
 
+    // --- decide what this pass has to do -----------------------------
+    const needLocate =
+      !boardRect || framesSinceLocate >= Math.max(1, settings.value.relocateEvery)
+
+    const ratio =
+      typeof api.frameChangeRatio === 'function'
+        ? Number(api.frameChangeRatio())
+        : 1
+    lastChangeRatio.value = ratio
+
+    if (settings.value.skipUnchangedFrames && !needLocate) {
+      // Nothing on screen changed: the previous recognition is still valid, so
+      // there is no point spending an inference on it.
+      if (ratio < settings.value.changeThreshold) {
+        lastPassMode.value = 'skipped'
+        phase.value = 'waiting'
+        return
+      }
+    }
+
+    // --- acquire the frame -------------------------------------------
+    let image: HTMLImageElement
+    let usedFullFrame = false
+
+    if (needLocate && settings.value.useBoardCrop) {
+      usedFullFrame = true
+    }
+
+    if (usedFullFrame) {
+      const base64 = api.captureFrame()
+      if (!base64) {
+        phase.value = 'waiting'
+        return
+      }
+      lastPreview.value = `data:image/jpeg;base64,${base64}`
+      image = await loadImageElement(lastPreview.value)
+    } else {
+      const rect = boardRect!
+      const base64 = api.captureCrop(
+        Math.round(rect.left),
+        Math.round(rect.top),
+        Math.round(rect.width),
+        Math.round(rect.height),
+        settings.value.cropMaxEdge
+      )
+      if (!base64) {
+        // The crop request failed; force a full re-locate next time.
+        boardRect = null
+        phase.value = 'waiting'
+        return
+      }
+      lastPreview.value = `data:image/jpeg;base64,${base64}`
+      image = await loadImageElement(lastPreview.value)
+    }
+
+    // --- run the detector --------------------------------------------
     phase.value = 'recognising'
-    const img = await loadImageElement(lastPreview.value)
-    const boxes: DetectionBox[] =
-      await deps.recognition.processImageElement(img)
+    const startedAt = Date.now()
+    const boxes: DetectionBox[] = await deps.recognition.processImageElement(image)
+    lastInferenceMs.value = Date.now() - startedAt
     detectionCount.value = boxes.length
 
-    const boardBox = deps.recognition.getBoardBox(boxes)
-    boardDetected.value = !!boardBox
-    if (!boardBox) {
+    let grid: Grid | null = null
+
+    if (usedFullFrame) {
+      const boardBox = deps.recognition.getBoardBox(boxes)
+      boardDetected.value = !!boardBox
+      if (!boardBox) {
+        boardRect = null
+        boardQuad = null
+        framesSinceLocate = 0
+        phase.value = 'waiting'
+        lastWarnings.value = ['未识别到棋盘']
+        lastPassMode.value = 'full'
+        return
+      }
+
+      // Convert the box from transferred-image pixels back into captured-frame
+      // pixels, which is the space the native crop expects.
+      const imageWidth = image.naturalWidth || 1
+      const toFrame = frameWidth > 0 ? frameWidth / imageWidth : 1
+      const [bx, by, bw, bh] = boardBox.box
+      boardRect = {
+        left: bx * toFrame,
+        top: by * toFrame,
+        width: bw * toFrame,
+        height: bh * toFrame,
+      }
+      boardQuad = quadFromBox({
+        box: [
+          boardRect.left,
+          boardRect.top,
+          boardRect.width,
+          boardRect.height,
+        ],
+        score: boardBox.score,
+        labelIndex: boardBox.labelIndex,
+      })
+      framesSinceLocate = 0
+      lastPassMode.value = 'full'
+
+      // Full passes produce annotations in the same coordinate space as the
+      // stored sample image, which is what the labelling tool needs.
+      void saveSampleIfRecording(boxes, imageWidth, image.naturalHeight || 1)
+
+      const fullGrid = gridForFullPass(boxes)
+      const probe = buildJieqiFen(fullGrid, '-', turn, settings.value.minScore)
+      poolTracker.observe(countRevealedChars(probe.rows))
+      grid = fullGrid
+    } else {
+      framesSinceLocate++
+      lastPassMode.value = 'crop'
+      boardDetected.value = true
+      const cropW = image.naturalWidth || 1
+      const cropH = image.naturalHeight || 1
+      const mapped = gridFromBoardCrop(
+        boxes,
+        cropW,
+        cropH,
+        settings.value.minScore
+      )
+      grid = mapped.grid
+      const probe = buildJieqiFen(grid, '-', turn, settings.value.minScore)
+      poolTracker.observe(countRevealedChars(probe.rows))
+    }
+
+    if (!grid) {
       phase.value = 'waiting'
-      lastWarnings.value = ['未识别到棋盘']
       return
     }
 
-    const grid: Grid = deps.recognition.updateBoardGrid(boxes)
-    const quad = quadFromBox(boardBox)
-
-    // First build to learn which pieces are revealed in this frame...
-    const probe = buildJieqiFen(
-      grid,
-      '-',
-      turn,
-      settings.value.minScore
-    )
-    poolTracker.observe(countRevealedChars(probe.rows))
-
-    // ...then rebuild with the updated hidden pool.
     const result = buildJieqiFen(
       grid,
       poolTracker.poolFen(),
@@ -722,6 +991,15 @@ export function useLineConnect(deps: LineConnectDeps) {
     )
     lastFen.value = result.fen
     lastWarnings.value = result.warnings
+
+    // Mirror the recognised position onto the floating chessboard.
+    if (overlayVisible.value || chessboardWanted) {
+      try {
+        api.setChessboardFen?.(result.fen)
+      } catch {
+        // ignore
+      }
+    }
 
     if (resultsLookUnusable(result)) {
       phase.value = 'waiting'
@@ -764,6 +1042,13 @@ export function useLineConnect(deps: LineConnectDeps) {
     }
     expectedOpponentKey = null
 
+    const quad = boardQuad
+    if (!quad) {
+      boardRect = null
+      phase.value = 'waiting'
+      return
+    }
+
     phase.value = 'thinking'
     let best = await analysePosition(result.fen)
     if (!best) {
@@ -797,12 +1082,11 @@ export function useLineConnect(deps: LineConnectDeps) {
     }
 
     phase.value = 'moving'
-    const played = await performMove(best, quad, screenScale(captureStatus()))
+    const played = await performMove(best, quad, screenScale(status))
     lastMove.value = best
     if (played) {
       moveCount.value++
       lastMoveTime = Date.now()
-      // From now on we expect the opponent to answer.
       expectedOpponentKey = key
       turn = turn === 'w' ? 'b' : 'w'
       log('info', `已落子 ${best}，等待对手…`)
@@ -811,6 +1095,53 @@ export function useLineConnect(deps: LineConnectDeps) {
     }
 
     phase.value = 'waiting'
+  }
+
+  /** Runs the full-frame path (which has a Board detection) into a grid. */
+  function gridForFullPass(boxes: DetectionBox[]): Grid {
+    return deps.recognition.updateBoardGrid(boxes)
+  }
+
+  /**
+   * Stores the newest full-frame recognition as a training sample.
+   *
+   * Only full passes are stored: they see the whole screenshot (including the
+   * Board box), which is what the detector has to learn to handle.
+   */
+  async function saveSampleIfRecording(
+    boxes: DetectionBox[],
+    imageWidth: number,
+    imageHeight: number
+  ) {
+    if (!settings.value.recordSamples || !sampleRecordingActive) return
+    const api = bridge()
+    if (!api?.saveSample) return
+
+    const payload = {
+      imageWidth,
+      imageHeight,
+      board: boardRect,
+      // `box` is [x, y, w, h] in image pixels, matching the stored sample image.
+      boxes: boxes.map(b => ({
+        cls: b.labelIndex,
+        name: LABELS[b.labelIndex]?.name ?? '',
+        x: b.box[0],
+        y: b.box[1],
+        w: b.box[2],
+        h: b.box[3],
+        score: b.score,
+      })),
+    }
+
+    try {
+      const saved = !!api.saveSample(JSON.stringify(payload))
+      if (saved) {
+        sampleSaved.value++
+        sampleCount.value = api.sampleCount?.() ?? sampleCount.value + 1
+      }
+    } catch (e) {
+      log('warn', `保存样本失败：${String(e)}`)
+    }
   }
 
   function resultsLookUnusable(result: {
@@ -923,6 +1254,20 @@ export function useLineConnect(deps: LineConnectDeps) {
     refreshOverlayVisible,
     canDrawOverlays,
     openOverlaySettings,
+    refreshNativeCounters,
+    lastChangeRatio,
+    lastPassMode,
+    lastInferenceMs,
+    sampleCount,
+    sampleSaved,
+    isSampleRecording,
+    toggleSampleRecording,
+    samplePath,
+    chessboardVisible,
+    showChessboard,
+    hideChessboard,
+    toggleChessboard,
+    refreshChessboardVisible,
     syncOverlay,
     resetSession,
     onNativeTick,
