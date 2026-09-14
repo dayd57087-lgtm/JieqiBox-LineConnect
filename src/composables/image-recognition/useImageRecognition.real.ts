@@ -23,6 +23,14 @@ export const useImageRecognition = () => {
   const outputCanvas = ref<HTMLCanvasElement | null>(null)
   const showBoundingBoxes = ref(true)
 
+  /**
+   * Effective model input size and whether the loaded model accepts dynamic
+   * shapes. A fixed-shape graph (the exported upstream model) forces 640; a
+   * model exported with dynamic axes can run much smaller, which is the single
+   * biggest speed lever for the line-connect loop.
+   */
+  const modelInput = ref({ size: 640, dynamic: false, nativeSize: 640 })
+
   // Initialize model
   const initializeModel = async (): Promise<void> => {
     if (session.value) return
@@ -58,6 +66,7 @@ export const useImageRecognition = () => {
           })
       }
       session.value = await sharedSessionPromise
+      resolveModelInputSize()
       status.value = t(
         'positionEditor.imageRecognitionStatus.modelLoadedSuccessfully'
       )
@@ -76,6 +85,35 @@ export const useImageRecognition = () => {
     } finally {
       isModelLoading.value = false
     }
+  }
+
+  /** Reads the graph's input shape and decides which size to run at. */
+  function resolveModelInputSize(requested?: number) {
+    const sess = session.value
+    if (!sess) return
+    const meta: any = sess.inputMetadata?.[0]
+    // Non-tensor inputs carry no shape; only tensors have `shape`.
+    const dims = (meta?.isTensor ? meta.shape : []) as Array<
+      number | string | undefined
+    >
+    const h = dims[2]
+    const w = dims[3]
+    const fixed =
+      typeof h === 'number' && h > 0 && typeof w === 'number' && w > 0
+    const nativeSize = fixed ? Math.max(h as number, w as number) : 0
+    const size = fixed
+      ? nativeSize
+      : Math.min(640, Math.max(256, Math.round(requested ?? 416)))
+    modelInput.value = { size, dynamic: !fixed, nativeSize }
+    console.log(
+      `[image-recognition] input ${JSON.stringify(dims)} -> running at ${size}px` +
+        (fixed ? ' (fixed by the model)' : ' (dynamic model)')
+    )
+  }
+
+  /** Lets the caller pick the input size; ignored by fixed-shape models. */
+  const setModelInputSize = (requested: number) => {
+    resolveModelInputSize(requested)
   }
 
   // Utility functions
@@ -185,8 +223,8 @@ export const useImageRecognition = () => {
   const preprocess = async (
     image: HTMLImageElement
   ): Promise<{ tensor: ort.Tensor; meta: ProcessedImage['meta'] }> => {
-    const modelW = 640
-    const modelH = 640
+    const modelW = modelInput.value.size
+    const modelH = modelInput.value.size
 
     const { canvas, meta } = letterbox(image, [modelH, modelW], 114)
 
@@ -723,6 +761,8 @@ export const useImageRecognition = () => {
     processImage,
     processImageElement,
     getBoardBox,
+    modelInput,
+    setModelInputSize,
     drawBoundingBoxes,
     updateBoardGrid,
     initializeModel,

@@ -271,6 +271,8 @@
                   density="compact"
                   variant="outlined"
                   hide-details
+                  :hint="t('lineConnect.autoSideHint')"
+                  persistent-hint
                 />
                 <v-select
                   v-model="settings.clickMode"
@@ -364,6 +366,29 @@
                   hide-details
                 />
                 <v-text-field
+                  v-model.number="settings.detectWindowMs"
+                  type="number"
+                  min="1000"
+                  max="20000"
+                  step="500"
+                  :label="t('lineConnect.detectWindow')"
+                  suffix="ms"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                />
+                <v-text-field
+                  v-model.number="settings.modelInputSize"
+                  type="number"
+                  min="256"
+                  max="640"
+                  step="32"
+                  :label="t('lineConnect.modelInputSize')"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                />
+                <v-text-field
                   v-model.number="settings.changeThreshold"
                   type="number"
                   min="0"
@@ -391,18 +416,12 @@
                   hide-details
                 />
                 <v-switch
-                  v-model="settings.dryRun"
-                  :label="t('lineConnect.dryRun')"
+                  :model-value="autoPlay"
+                  :label="t('lineConnect.autoPlaySwitch')"
                   color="warning"
                   density="compact"
                   hide-details
-                />
-                <v-switch
-                  v-model="settings.assumeMyTurn"
-                  :label="t('lineConnect.assumeMyTurn')"
-                  color="primary"
-                  density="compact"
-                  hide-details
+                  @update:model-value="v => setAutoPlay(!!v)"
                 />
               </div>
             </v-expansion-panel-text>
@@ -421,13 +440,15 @@
                   {{ boardDetected ? t('lineConnect.found') : t('lineConnect.missing') }}
                 </span>
                 <span>{{ t('lineConnect.overlayTicks') }}: {{ tickCount }}</span>
+                <span>{{ detectedSideText }}</span>
+                <span>{{ t('lineConnect.evalNow') }}: {{ evaluation }}</span>
                 <span>
                   {{ t('lineConnect.perfMode') }}:
                   {{
                     lastPassMode === 'crop'
                       ? t('lineConnect.perfCrop')
-                      : lastPassMode === 'skipped'
-                        ? t('lineConnect.perfSkipped')
+                      : lastPassMode === 'cached'
+                        ? t('lineConnect.perfCached')
                         : t('lineConnect.perfFull')
                   }}
                 </span>
@@ -556,6 +577,10 @@
     isCapturing,
     hasCapturePermission,
     hasAccessibility,
+    autoPlay,
+    mySide,
+    evaluation,
+    setAutoPlay,
     overlayVisible,
     tickCount,
     showOverlay,
@@ -595,9 +620,16 @@
   const logContainer = ref<HTMLElement | null>(null)
 
   const sideOptions = computed(() => [
+    { label: t('lineConnect.autoSide'), value: 'auto' },
     { label: t('lineConnect.red'), value: 'w' },
     { label: t('lineConnect.black'), value: 'b' },
   ])
+
+  const detectedSideText = computed(() => {
+    const side = mySide.value
+    if (!side) return t('lineConnect.autoDetecting')
+    return side === 'w' ? t('lineConnect.detectedRed') : t('lineConnect.detectedBlack')
+  })
 
   const clickModeOptions = computed(() => [
     { label: t('lineConnect.tapMode'), value: 'tap' },

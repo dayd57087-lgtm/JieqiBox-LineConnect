@@ -21,13 +21,13 @@ import android.widget.TextView
 /**
  * Draggable control/status bar drawn on top of other apps.
  *
- * Layout (mirrors the reference design):
+ * Layout:
  *
- *   [新局][扫描][自动][变招][棋盘]                        [✕]
- *   轮到红方 · 识别中        评估 +0.35        等待 3s
+ *   [新局][连线][自动][变招][棋盘]                       [✕]
+ *   我执黑 · 黑方走 · 识别中     评估 +0.35     等待 3秒
  *
- * The whole bar is draggable by its status row; the buttons keep their own
- * click handling.
+ * The whole bar is draggable by its status row; the buttons keep their own click
+ * handling. Tapping the status row collapses the button row.
  */
 class LineConnectOverlay(
     private val context: Context,
@@ -38,12 +38,10 @@ class LineConnectOverlay(
         private const val TAG = "LineConnectOverlay"
 
         const val ACTION_NEW_GAME = "newGame"
-        const val ACTION_SCAN = "scan"
+        const val ACTION_CONNECT = "connect"
         const val ACTION_AUTO = "auto"
         const val ACTION_VARIATION = "variation"
         const val ACTION_BOARD = "board"
-        const val ACTION_APP = "app"
-        const val ACTION_COLLAPSE = "collapse"
         const val ACTION_CLOSE = "close"
 
         private const val COLOR_BAR_BG = 0xE8171717.toInt()
@@ -51,6 +49,7 @@ class LineConnectOverlay(
         private const val COLOR_BTN_GREEN = 0xFF2E7D32.toInt()
         private const val COLOR_BTN_RED = 0xFFC62828.toInt()
         private const val COLOR_BTN_AMBER = 0xFFB8860B.toInt()
+        private const val COLOR_BTN_BLUE = 0xFF1565C0.toInt()
         private const val COLOR_TEXT = 0xFFFFFFFF.toInt()
         private const val COLOR_TEXT_DIM = 0xFFB4B4B4.toInt()
         private const val COLOR_DIVIDER = 0x33FFFFFF
@@ -66,10 +65,12 @@ class LineConnectOverlay(
     private var statusView: TextView? = null
     private var evalView: TextView? = null
     private var waitView: TextView? = null
+
+    private var connectButton: TextView? = null
     private var autoButton: TextView? = null
+    private var boardButton: TextView? = null
     private val actionButtons = mutableMapOf<String, TextView>()
 
-    /** Collapsed mode keeps only the status row, to get out of the way. */
     private var collapsed = false
 
     val isVisible: Boolean
@@ -82,7 +83,6 @@ class LineConnectOverlay(
     /* Lifecycle                                                           */
     /* ------------------------------------------------------------------ */
 
-    /** Adds the bar to the screen. Safe to call repeatedly. */
     fun show(): Boolean {
         if (root != null) return true
 
@@ -101,7 +101,7 @@ class LineConnectOverlay(
                     PixelFormat.TRANSLUCENT
                 ).apply {
                     gravity = Gravity.TOP or Gravity.START
-                    x = dp(10)
+                    x = dp(8)
                     y = dp(90)
                 }
                 wm.addView(view, lp)
@@ -116,7 +116,6 @@ class LineConnectOverlay(
         return added
     }
 
-    /** Removes the bar from the screen. */
     fun hide() {
         runOnMain {
             val view = root ?: return@runOnMain
@@ -132,19 +131,18 @@ class LineConnectOverlay(
             statusView = null
             evalView = null
             waitView = null
+            connectButton = null
             autoButton = null
+            boardButton = null
             actionButtons.clear()
             Log.i(TAG, "Overlay hidden")
         }
     }
 
-    /** Collapses the bar to a single compact row. */
     fun setCollapsed(value: Boolean) {
         runOnMain {
             collapsed = value
             bar?.let { b ->
-                // Row 0 = buttons, row 1 = status. In collapsed mode the status
-                // row becomes the drag handle for the whole bar.
                 b.getChildAt(0)?.visibility = if (value) View.GONE else View.VISIBLE
                 b.requestLayout()
             }
@@ -157,16 +155,17 @@ class LineConnectOverlay(
 
     /**
      * Refreshes the visible state. Every argument is optional so the caller can
-     * push just the fields that changed.
+     * push only the fields that changed.
      */
     fun update(
         turn: String? = null,
         status: String? = null,
         evaluation: String? = null,
         waiting: String? = null,
-        autoRunning: Boolean? = null,
+        connectRunning: Boolean? = null,
+        autoPlay: Boolean? = null,
         autoEnabled: Boolean? = null,
-        scanEnabled: Boolean? = null
+        boardVisible: Boolean? = null
     ) {
         runOnMain {
             turn?.let { turnView?.text = it }
@@ -174,22 +173,41 @@ class LineConnectOverlay(
             evaluation?.let { evalView?.text = it }
             waiting?.let { waitView?.text = it }
 
-            autoRunning?.let { running ->
-                autoButton?.let { btn ->
+            connectRunning?.let { running ->
+                connectButton?.let { btn ->
                     btn.text = context.getString(
-                        if (running) R.string.line_connect_overlay_auto_stop
-                        else R.string.line_connect_overlay_auto_start
+                        if (running) R.string.line_connect_overlay_disconnect
+                        else R.string.line_connect_overlay_connect
                     )
                     btn.background = buttonBackground(
-                        if (running) COLOR_BTN_RED else COLOR_BTN_AMBER
+                        if (running) COLOR_BTN_RED else COLOR_BTN_GREEN
                     )
                 }
             }
-            autoEnabled?.let { enabled ->
-                autoButton?.alpha = if (enabled) 1f else 0.4f
+
+            autoPlay?.let { playing ->
+                autoButton?.let { btn ->
+                    // The label names the current mode, tapping switches modes.
+                    btn.text = context.getString(
+                        if (playing) R.string.line_connect_overlay_auto
+                        else R.string.line_connect_overlay_analysis
+                    )
+                    btn.background = buttonBackground(
+                        if (playing) COLOR_BTN_AMBER else COLOR_BTN_BLUE
+                    )
+                }
             }
-            scanEnabled?.let { enabled ->
-                actionButtons[ACTION_SCAN]?.alpha = if (enabled) 1f else 0.4f
+
+            boardVisible?.let { visible ->
+                boardButton?.let { btn ->
+                    btn.background = buttonBackground(
+                        if (visible) COLOR_BTN_BLUE else COLOR_BTN
+                    )
+                }
+            }
+
+            autoEnabled?.let { enabled ->
+                autoButton?.alpha = if (enabled) 1f else 0.45f
             }
         }
     }
@@ -205,7 +223,6 @@ class LineConnectOverlay(
                 setColor(COLOR_BAR_BG)
                 cornerRadius = dpF(12f)
             }
-            // Padding inside the rounded background
             val p = dp(6)
             setPadding(p, dp(5), p, dp(5))
             elevation = dpF(8f)
@@ -217,27 +234,25 @@ class LineConnectOverlay(
             gravity = Gravity.CENTER_VERTICAL
         }
 
+        connectButton = makeButton(
+            context.getString(R.string.line_connect_overlay_connect),
+            ACTION_CONNECT,
+            COLOR_BTN_GREEN
+        )
         buttonRow.addView(
             makeButton(
                 context.getString(R.string.line_connect_overlay_new_game),
                 ACTION_NEW_GAME,
-                COLOR_BTN_GREEN
-            )
-        )
-        buttonRow.addView(
-            makeButton(
-                context.getString(R.string.line_connect_overlay_scan),
-                ACTION_SCAN,
                 COLOR_BTN
             )
         )
-        buttonRow.addView(
-            makeButton(
-                context.getString(R.string.line_connect_overlay_auto_start),
-                ACTION_AUTO,
-                COLOR_BTN_AMBER
-            ).also { autoButton = it }
+        buttonRow.addView(connectButton)
+        autoButton = makeButton(
+            context.getString(R.string.line_connect_overlay_auto),
+            ACTION_AUTO,
+            COLOR_BTN_AMBER
         )
+        buttonRow.addView(autoButton)
         buttonRow.addView(
             makeButton(
                 context.getString(R.string.line_connect_overlay_variation),
@@ -245,25 +260,17 @@ class LineConnectOverlay(
                 COLOR_BTN
             )
         )
-        buttonRow.addView(
-            makeButton(
-                context.getString(R.string.line_connect_overlay_board),
-                ACTION_BOARD,
-                COLOR_BTN
-            )
+        boardButton = makeButton(
+            context.getString(R.string.line_connect_overlay_board),
+            ACTION_BOARD,
+            COLOR_BTN
         )
-
-        val spacer = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-        }
-        buttonRow.addView(spacer)
+        buttonRow.addView(boardButton)
 
         buttonRow.addView(
-            makeButton(
-                context.getString(R.string.line_connect_overlay_app),
-                ACTION_APP,
-                COLOR_BTN
-            )
+            View(context).apply {
+                layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+            }
         )
         buttonRow.addView(
             makeButton("\u2715", ACTION_CLOSE, COLOR_BTN, compact = true)
@@ -275,11 +282,13 @@ class LineConnectOverlay(
         val statusRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            val p = dp(6)
-            setPadding(p, dp(4), p, dp(2))
+            setPadding(dp(6), dp(4), dp(6), dp(2))
         }
 
-        turnView = makeStatusText(context.getString(R.string.line_connect_overlay_idle), COLOR_TEXT)
+        turnView = makeStatusText(
+            context.getString(R.string.line_connect_overlay_idle),
+            COLOR_TEXT
+        )
         statusView = makeStatusText("", COLOR_TEXT_DIM)
         evalView = makeStatusText("", COLOR_TEXT_DIM)
         waitView = makeStatusText("", COLOR_TEXT_DIM)
@@ -287,19 +296,16 @@ class LineConnectOverlay(
         statusRow.addView(turnView)
         statusRow.addView(makeDivider())
         statusRow.addView(statusView)
-
-        val statusSpacer = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-        }
-        statusRow.addView(statusSpacer)
-
+        statusRow.addView(
+            View(context).apply {
+                layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+            }
+        )
         statusRow.addView(evalView)
         statusRow.addView(makeDivider())
         statusRow.addView(waitView)
 
-        // The status row doubles as the drag handle.
         attachDrag(statusRow)
-
         column.addView(statusRow)
 
         return column
@@ -337,7 +343,7 @@ class LineConnectOverlay(
         val btn = TextView(context).apply {
             text = label
             setTextColor(COLOR_TEXT)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 12f else 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             gravity = Gravity.CENTER
             isClickable = true
             isFocusable = false
@@ -352,15 +358,7 @@ class LineConnectOverlay(
                 marginEnd = dp(4)
             }
         }
-        btn.setOnClickListener {
-            if (action == ACTION_COLLAPSE) {
-                setCollapsed(!collapsed)
-            } else if (action == ACTION_CLOSE) {
-                onAction(ACTION_CLOSE)
-            } else {
-                onAction(action)
-            }
-        }
+        btn.setOnClickListener { onAction(action) }
         actionButtons[action] = btn
         return btn
     }
@@ -413,10 +411,7 @@ class LineConnectOverlay(
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!dragging) {
-                        // Tapping the status row toggles the collapsed state.
-                        setCollapsed(!collapsed)
-                    }
+                    if (!dragging) setCollapsed(!collapsed)
                     true
                 }
                 else -> false
@@ -444,10 +439,7 @@ class LineConnectOverlay(
     }
 
     private fun runOnMain(block: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            block()
-        } else {
-            mainHandler.post(block)
-        }
+        if (Looper.myLooper() == Looper.getMainLooper()) block()
+        else mainHandler.post(block)
     }
 }

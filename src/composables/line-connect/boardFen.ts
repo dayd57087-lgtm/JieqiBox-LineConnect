@@ -167,6 +167,52 @@ export class JieqiPoolTracker {
 }
 
 /* ------------------------------------------------------------------------- */
+/* Opening position detection                                                */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Occupancy mask of the standard Jieqi opening position.
+ *
+ * The opening setup is fixed and highly distinctive, so recognising it gives a
+ * reliable anchor: whoever plays red moves first, which pins down the side to
+ * move for the rest of the game.
+ */
+const START_OCCUPANCY = [
+  '111111111', // xxxxkxxxx
+  '000000000', // 9
+  '010000010', // 1x5x1
+  '101010101', // x1x1x1x1x
+  '000000000', // 9
+  '000000000', // 9
+  '101010101', // X1X1X1X1X
+  '010000010', // 1X5X1
+  '000000000', // 9
+  '111111111', // XXXXKXXXX
+]
+
+/**
+ * True when the grid matches the standard opening layout.
+ *
+ * Only occupancy and the two generals are checked: every other piece is hidden
+ * at the start, so their identity carries no information.
+ */
+export function isStartPosition(grid: Grid): boolean {
+  for (let row = 0; row < BOARD_ROWS; row++) {
+    for (let col = 0; col < BOARD_COLS; col++) {
+      const occupied = grid?.[row]?.[col] != null
+      const expected = START_OCCUPANCY[row][col] === '1'
+      if (occupied !== expected) return false
+    }
+  }
+
+  // The generals must be on their own back rank; they are the only pieces that
+  // are revealed from the very first move.
+  const blackKing = labelToChar(grid[0][4]!)
+  const redKing = labelToChar(grid[9][4]!)
+  return blackKing === 'k' && redKing === 'K'
+}
+
+/* ------------------------------------------------------------------------- */
 /* Grid -> FEN                                                               */
 /* ------------------------------------------------------------------------- */
 

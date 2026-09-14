@@ -8,20 +8,27 @@ export type SideToMove = 'w' | 'b'
 /** How the auto player should perform a move on the mirrored board. */
 export type ClickMode = 'tap' | 'drag'
 
+/** Which side the user plays. `auto` infers it from the observed game flow. */
+export type SideSetting = 'auto' | 'w' | 'b'
+
 export interface LineConnectSettings {
-  /** Side the user is playing on the mirrored platform. */
-  mySide: SideToMove
+  /**
+   * Side the user is playing.
+   *
+   * `auto` (the default) works it out from the game flow: the standard opening
+   * position tells us red is to move, and any move that happens while we are not
+   * playing must have been made by the opponent.
+   */
+  mySide: SideSetting
+  /** How long to wait for the opponent before assuming it is our turn, in ms. */
+  detectWindowMs: number
   /** Delay between two recognition passes, in milliseconds. */
   pollIntervalMs: number
-  /**
-   * Resolution factor applied to the screen before recognition (0.15 - 1).
-   * Keep this high enough that the board still spans a few hundred pixels —
-   * the detector needs roughly 25px per piece to be reliable.
-   */
+  /** Resolution factor applied to the screen before recognition (0.15 - 1). */
   captureScale: number
   /** JPEG quality used when transferring a frame to the webview. */
   jpegQuality: number
-  /** How many identical frames in a row are required before acting. */
+  /** How many identical observations are required before acting. */
   stableFrames: number
   /** Engine thinking time per move, in milliseconds. */
   thinkTimeMs: number
@@ -31,10 +38,6 @@ export interface LineConnectSettings {
   clickGapMs: number
   /** Mirror the recognised position onto the app board. */
   syncBoard: boolean
-  /** Practice mode: analyse and log, but never touch the screen. */
-  dryRun: boolean
-  /** Assume it is the user's turn when the loop starts. */
-  assumeMyTurn: boolean
   /** Minimum confidence for a detection to be trusted. */
   minScore: number
   /**
@@ -53,28 +56,33 @@ export interface LineConnectSettings {
   skipUnchangedFrames: boolean
   /** Fraction of changed frame cells that counts as "something happened". */
   changeThreshold: number
+  /**
+   * Model input size. Only used when the loaded model accepts dynamic shapes;
+   * a fixed-shape model keeps its own size.
+   */
+  modelInputSize: number
   /** Save screenshots plus recognition results for labelling / fine-tuning. */
   recordSamples: boolean
 }
 
 export const DEFAULT_SETTINGS: LineConnectSettings = {
-  mySide: 'w',
-  pollIntervalMs: 500,
+  mySide: 'auto',
+  detectWindowMs: 5000,
+  pollIntervalMs: 400,
   captureScale: 0.75,
   jpegQuality: 70,
   stableFrames: 2,
-  thinkTimeMs: 1200,
+  thinkTimeMs: 800,
   clickMode: 'tap',
   clickGapMs: 120,
   syncBoard: true,
-  dryRun: false,
-  assumeMyTurn: true,
   minScore: 0.35,
   useBoardCrop: true,
-  cropMaxEdge: 640,
-  relocateEvery: 25,
+  cropMaxEdge: 512,
+  relocateEvery: 30,
   skipUnchangedFrames: true,
-  changeThreshold: 0.002,
+  changeThreshold: 0.004,
+  modelInputSize: 416,
   recordSamples: false,
 }
 
@@ -95,4 +103,12 @@ export interface CaptureStatus {
   lastFrameTime: number
   frames: number
   hasPermission: boolean
+}
+
+/** Payload pushed into the floating chessboard so it can draw arrows. */
+export interface BoardMoveHint {
+  /** Engine's suggested move, UCI. */
+  best?: string
+  /** The move that produced the current position, UCI. */
+  last?: string
 }

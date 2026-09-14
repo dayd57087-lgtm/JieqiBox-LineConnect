@@ -122,6 +122,18 @@ class ScreenCaptureService : Service() {
     /** Coarse luminance fingerprint of the newest frame, used for change detection. */
     @Volatile private var latestSignature: IntArray? = null
 
+    /**
+     * Region of the frame used for change detection, as fractions (0..1).
+     *
+     * Defaults to everything except the very top and bottom strips, so the status
+     * bar clock and the navigation bar cannot keep the loop busy. Once the board
+     * has been located the JS side narrows this to the board itself.
+     */
+    @Volatile private var watchLeft = 0f
+    @Volatile private var watchTop = 0.06f
+    @Volatile private var watchRight = 1f
+    @Volatile private var watchBottom = 0.92f
+
     /** How much of the frame changed compared to the previous accepted frame (0..1). */
     @Volatile var lastChangeRatio: Double = 1.0
         private set
@@ -410,14 +422,22 @@ class ScreenCaptureService : Service() {
     private fun luminanceSignature(bitmap: Bitmap): IntArray {
         val grid = SIGNATURE_GRID
         val out = IntArray(grid * grid)
-        val stepX = Math.max(1, bitmap.width / grid)
-        val stepY = Math.max(1, bitmap.height / grid)
+
+        val regionLeft = (bitmap.width * watchLeft).toInt().coerceIn(0, bitmap.width - 1)
+        val regionTop = (bitmap.height * watchTop).toInt().coerceIn(0, bitmap.height - 1)
+        val regionRight = (bitmap.width * watchRight).toInt().coerceIn(regionLeft + 1, bitmap.width)
+        val regionBottom = (bitmap.height * watchBottom).toInt().coerceIn(regionTop + 1, bitmap.height)
+        val regionW = regionRight - regionLeft
+        val regionH = regionBottom - regionTop
+
+        val stepX = Math.max(1, regionW / grid)
+        val stepY = Math.max(1, regionH / grid)
         val pixel = IntArray(stepX * stepY)
 
         for (gy in 0 until grid) {
             for (gx in 0 until grid) {
-                val x0 = Math.min(gx * stepX, bitmap.width - 1)
-                val y0 = Math.min(gy * stepY, bitmap.height - 1)
+                val x0 = Math.min(regionLeft + gx * stepX, bitmap.width - 1)
+                val y0 = Math.min(regionTop + gy * stepY, bitmap.height - 1)
                 val w = Math.min(stepX, bitmap.width - x0)
                 val h = Math.min(stepY, bitmap.height - y0)
                 if (w <= 0 || h <= 0) continue
@@ -513,6 +533,27 @@ class ScreenCaptureService : Service() {
     /** Fraction of the frame that changed since the previous accepted frame. */
     fun frameChangeRatio(): Double = lastChangeRatio
 
+    /**
+     * Narrows change detection to the board rectangle (fractions of the frame).
+     *
+     * Keeps the status-bar clock out of the fingerprint: with the whole screen
+     * watched, a ticking clock alone would report a change every second and the
+     * loop would run an inference for nothing.
+     */
+    fun setWatchRegion(left: Float, top: Float, right: Float, bottom: Float) {
+        watchLeft = left.coerceIn(0f, 1f)
+        watchTop = top.coerceIn(0f, 1f)
+        watchRight = right.coerceIn(0f, 1f)
+        watchBottom = bottom.coerceIn(0f, 1f)
+        if (watchRight - watchLeft < 0.05f || watchBottom - watchTop < 0.05f) {
+            // Degenerate request: fall back to the default region.
+            watchLeft = 0f
+            watchTop = 0.06f
+            watchRight = 1f
+            watchBottom = 0.92f
+        }
+    }
+
     /** Returns how many frames have been produced since the service started. */
     fun framesCaptured(): Long = frameCounter
 
@@ -597,6 +638,11 @@ class ScreenCaptureService : Service() {
     /** Updates the position rendered by the floating chessboard. */
     fun setChessboardFen(fen: String) {
         chessboard?.setFen(fen)
+    }
+
+    /** Updates the arrows (engine suggestion / last move) on the chessboard. */
+    fun setChessboardMoves(best: String, last: String) {
+        chessboard?.setMoves(best, last)
     }
 
     /* ------------------------------------------------------------------ */
@@ -750,18 +796,20 @@ class ScreenCaptureService : Service() {
         status: String?,
         evaluation: String?,
         waiting: String?,
-        autoRunning: Boolean?,
+        connectRunning: Boolean?,
+        autoPlay: Boolean?,
         autoEnabled: Boolean?,
-        scanEnabled: Boolean?
+        boardVisible: Boolean?
     ) {
         overlay?.update(
             turn = turn,
             status = status,
             evaluation = evaluation,
             waiting = waiting,
-            autoRunning = autoRunning,
+            connectRunning = connectRunning,
+            autoPlay = autoPlay,
             autoEnabled = autoEnabled,
-            scanEnabled = scanEnabled
+            boardVisible = boardVisible
         )
     }
 

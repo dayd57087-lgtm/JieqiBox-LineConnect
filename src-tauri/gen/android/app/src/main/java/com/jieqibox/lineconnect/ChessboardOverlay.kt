@@ -52,6 +52,12 @@ class ChessboardOverlay(private val context: Context) {
     @Volatile
     private var pendingFen: String = ""
 
+    /** Move hints (engine suggestion / last move) pushed from the webview. */
+    @Volatile
+    private var pendingBest: String = ""
+    @Volatile
+    private var pendingLast: String = ""
+
     val isVisible: Boolean
         get() = root != null
 
@@ -84,7 +90,11 @@ class ChessboardOverlay(private val context: Context) {
                 root = view
                 params = lp
                 attachMove(view)
-                board?.fen = pendingFen
+                board?.apply {
+                    fen = pendingFen
+                    bestMove = pendingBest
+                    lastMove = pendingLast
+                }
                 added = true
                 Log.i(TAG, "Chessboard shown")
             } catch (e: Exception) {
@@ -116,6 +126,23 @@ class ChessboardOverlay(private val context: Context) {
     }
 
     fun currentFen(): String = pendingFen
+
+    /**
+     * Updates the arrows drawn on top of the board.
+     *
+     * @param best engine suggestion (UCI, may be empty)
+     * @param last move that produced the current position (UCI, may be empty)
+     */
+    fun setMoves(best: String, last: String) {
+        pendingBest = best
+        pendingLast = last
+        runOnMain {
+            board?.apply {
+                bestMove = best
+                lastMove = last
+            }
+        }
+    }
 
     /* ------------------------------------------------------------------ */
     /* View construction                                                   */
@@ -359,6 +386,16 @@ class XiangqiBoardView(context: Context) : View(context) {
         color = RIVER_TEXT
         textAlign = Paint.Align.CENTER
     }
+    private val bestArrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xE62962FF.toInt()
+        style = Paint.Style.FILL_AND_STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val lastArrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xB0FFB300.toInt()
+        style = Paint.Style.FILL_AND_STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
 
     /** Cells[row][col] holds the FEN letter, or '\u0000' when empty. */
     private var cells: Array<CharArray> =
@@ -369,6 +406,24 @@ class XiangqiBoardView(context: Context) : View(context) {
             if (field == value) return
             field = value
             parseFen(value)
+            invalidate()
+        }
+
+    /** Engine suggestion, UCI (e.g. "h2e2"). Drawn as an arrow. */
+    var bestMove: String = ""
+        set(value) {
+            val trimmed = value.trim().take(4)
+            if (field == trimmed) return
+            field = trimmed
+            invalidate()
+        }
+
+    /** Move that produced the current position, UCI. Drawn as a fainter arrow. */
+    var lastMove: String = ""
+        set(value) {
+            val trimmed = value.trim().take(4)
+            if (field == trimmed) return
+            field = trimmed
             invalidate()
         }
 
@@ -470,6 +525,80 @@ class XiangqiBoardView(context: Context) : View(context) {
                 drawPiece(canvas, cx, cy, radius, letter, glyphPaint)
             }
         }
+
+        // Arrows last so they sit above the pieces.
+        val shaft = Math.min(cellW, cellH) * 0.16f
+        drawArrow(canvas, left, top, cellW, cellH, lastMove, lastArrowPaint, shaft, radius)
+        drawArrow(canvas, left, top, cellW, cellH, bestMove, bestArrowPaint, shaft * 1.35f, radius)
+    }
+
+    private fun drawArrow(
+        canvas: Canvas,
+        left: Float,
+        top: Float,
+        cellW: Float,
+        cellH: Float,
+        uci: String,
+        paint: Paint,
+        shaft: Float,
+        radius: Float
+    ) {
+        if (uci.length < 4) return
+        val from = uciSquare(uci, 0) ?: return
+        val to = uciSquare(uci, 2) ?: return
+
+        val x1 = left + from.second * cellW
+        val y1 = top + from.first * cellH
+        val x2 = left + to.second * cellW
+        val y2 = top + to.first * cellH
+
+        val dx = x2 - x1
+        val dy = y2 - y1
+        val len = Math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
+        if (len < 1f) return
+        val ux = dx / len
+        val uy = dy / len
+
+        // Stop short of the target square centre so the head does not cover the
+        // piece that just moved there.
+        val tipInset = radius * 0.55f
+        val tailInset = radius * 0.75f
+        val sx = x1 + ux * tailInset
+        val sy = y1 + uy * tailInset
+        val ex = x2 - ux * tipInset
+        val ey = y2 - uy * tipInset
+
+        val headLen = Math.max(shaft * 2.6f, radius * 0.85f)
+        val headWidth = Math.max(shaft * 2.2f, radius * 0.75f)
+        val baseX = ex - ux * headLen
+        val baseY = ey - uy * headLen
+
+        paint.strokeWidth = shaft
+        canvas.drawLine(sx, sy, baseX, baseY, paint)
+
+        // Perpendicular for the head triangle.
+        val px = -uy
+        val py = ux
+        val path = android.graphics.Path()
+        path.moveTo(ex, ey)
+        path.lineTo(baseX + px * headWidth / 2f, baseY + py * headWidth / 2f)
+        path.lineTo(baseX - px * headWidth / 2f, baseY - py * headWidth / 2f)
+        path.close()
+        val fill = Paint(paint)
+        fill.style = Paint.Style.FILL
+        canvas.drawPath(path, fill)
+    }
+
+    /** UCI square -> (row, col) in the rendered lattice, or null when invalid. */
+    private fun uciSquare(uci: String, offset: Int): Pair<Int, Int>? {
+        if (uci.length < offset + 2) return null
+        val file = uci[offset]
+        val rank = uci[offset + 1]
+        if (file !in 'a'..'i' || rank !in '0'..'9') return null
+        val col = file - 'a'
+        val row = 9 - (rank - '0')
+        if (row !in 0..9 || col !in 0..8) return null
+        return row to col
     }
 
     private fun drawPiece(

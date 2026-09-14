@@ -27,6 +27,10 @@ export const useImageRecognition = () => {
       return []
     },
     getBoardBox: (_boxes: DetectionBox[]): DetectionBox | null => null,
+    modelInput: readonly(ref({ size: 640, dynamic: false, nativeSize: 640 })),
+    setModelInputSize: (_size: number): void => {
+      /* no-op */
+    },
     drawBoundingBoxes: (
       _boxes: DetectionBox[],
       _imgElement: HTMLImageElement,

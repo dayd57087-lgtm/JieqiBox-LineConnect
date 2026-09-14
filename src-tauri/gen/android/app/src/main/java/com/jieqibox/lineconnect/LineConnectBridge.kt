@@ -145,6 +145,39 @@ class LineConnectBridge(private val activity: MainActivity) {
         ScreenCaptureService.instance?.setChessboardFen(fen)
     }
 
+    /**
+     * Pushes the arrows drawn on the floating chessboard.
+     *
+     * @param json object with optional string fields: best (engine suggestion,
+     *             UCI) and last (the move that produced the position)
+     */
+    @JavascriptInterface
+    fun setChessboardMove(json: String) {
+        try {
+            val obj = JSONObject(json)
+            ScreenCaptureService.instance?.setChessboardMoves(
+                obj.optString("best", ""),
+                obj.optString("last", "")
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "setChessboardMove failed", e)
+        }
+    }
+
+    /**
+     * Narrows change detection to the board rectangle so the status-bar clock
+     * cannot keep the recognition loop busy. All values are fractions (0..1).
+     */
+    @JavascriptInterface
+    fun setWatchRegion(left: Double, top: Double, right: Double, bottom: Double) {
+        ScreenCaptureService.instance?.setWatchRegion(
+            left.toFloat(),
+            top.toFloat(),
+            right.toFloat(),
+            bottom.toFloat()
+        )
+    }
+
     /* ------------------------------------------------------------------ */
     /* Sample recording (dataset collection for fine-tuning)               */
     /* ------------------------------------------------------------------ */
@@ -334,7 +367,7 @@ class LineConnectBridge(private val activity: MainActivity) {
      * Pushes new content into the floating bar.
      *
      * @param json object with any of: turn, status, evaluation, waiting,
-     *             autoRunning, autoEnabled, scanEnabled
+     *             connectRunning, autoPlay, autoEnabled, boardVisible
      * @return true when the payload was applied
      */
     @JavascriptInterface
@@ -347,9 +380,10 @@ class LineConnectBridge(private val activity: MainActivity) {
                 status = obj.optStringOrNull("status"),
                 evaluation = obj.optStringOrNull("evaluation"),
                 waiting = obj.optStringOrNull("waiting"),
-                autoRunning = obj.optBooleanOrNull("autoRunning"),
+                connectRunning = obj.optBooleanOrNull("connectRunning"),
+                autoPlay = obj.optBooleanOrNull("autoPlay"),
                 autoEnabled = obj.optBooleanOrNull("autoEnabled"),
-                scanEnabled = obj.optBooleanOrNull("scanEnabled")
+                boardVisible = obj.optBooleanOrNull("boardVisible")
             )
             true
         } catch (e: Exception) {

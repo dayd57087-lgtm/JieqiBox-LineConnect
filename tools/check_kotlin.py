@@ -17,9 +17,9 @@ import pathlib
 import re
 import sys
 
-APP = pathlib.Path(
-    "/var/minis/workspace/jieqi/JieqiBox/src-tauri/gen/android/app/src/main"
-)
+# Resolved relative to this file so the checker works from any checkout.
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+APP = REPO_ROOT / "src-tauri/gen/android/app/src/main"
 KT_DIR = APP / "java/com/jieqibox/lineconnect"
 
 # Simple class name -> fully qualified name, for the APIs these files may use.
@@ -259,6 +259,8 @@ def check_cross_calls() -> None:
         ("ScreenCaptureService.kt", "frameChangeRatio"),
         ("ScreenCaptureService.kt", "ensureChessboard"),
         ("ScreenCaptureService.kt", "setChessboardFen"),
+        ("ScreenCaptureService.kt", "setChessboardMoves"),
+        ("ScreenCaptureService.kt", "setWatchRegion"),
         ("ScreenCaptureService.kt", "startSampleRecording"),
         ("ScreenCaptureService.kt", "saveSample"),
         ("ScreenCaptureService.kt", "sampleCount"),
@@ -269,6 +271,7 @@ def check_cross_calls() -> None:
         ("ChessboardOverlay.kt", "show"),
         ("ChessboardOverlay.kt", "hide"),
         ("ChessboardOverlay.kt", "setFen"),
+        ("ChessboardOverlay.kt", "setMoves"),
     ]
     for file_and_class, member in expectations:
         if file_and_class not in sources:
@@ -284,7 +287,8 @@ def check_cross_calls() -> None:
         failures.append("LineConnectOverlay.kt: could not locate update() signature")
     else:
         params = set(re.findall(r"(\w+):", match.group(1)))
-        for name in ("turn", "status", "evaluation", "waiting", "autoRunning", "autoEnabled", "scanEnabled"):
+        for name in ("turn", "status", "evaluation", "waiting", "connectRunning",
+                     "autoPlay", "autoEnabled", "boardVisible"):
             if name not in params:
                 failures.append(f"LineConnectOverlay.update(): missing parameter '{name}'")
 
@@ -294,7 +298,8 @@ def check_cross_calls() -> None:
         failures.append("ScreenCaptureService.kt: could not locate updateOverlay() signature")
     else:
         params = set(re.findall(r"(\w+):", match.group(1)))
-        for name in ("turn", "status", "evaluation", "waiting", "autoRunning", "autoEnabled", "scanEnabled"):
+        for name in ("turn", "status", "evaluation", "waiting", "connectRunning",
+                     "autoPlay", "autoEnabled", "boardVisible"):
             if name not in params:
                 failures.append(f"ScreenCaptureService.updateOverlay(): missing parameter '{name}'")
 
